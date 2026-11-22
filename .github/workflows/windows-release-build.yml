@@ -129,6 +129,31 @@ jobs:
         shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products "${{ inputs.products }}" --cli-arches "${{ inputs.cli_arches }}" --github-runner
 
+      # MSBuild reports the Rust bridge failure only as MSB8066 ("Custom build
+      # ... exited with code 1") and discards Cargo's diagnostics, which makes the
+      # real cause invisible. Build the same crate the CMake step will build, so a
+      # Cargo error surfaces with its full message before the Flutter build starts.
+      - name: Preflight Rust bridge build
+        if: inputs.products != 'cli'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $crate = "apps/flutter/native/operit-flutter-bridge"
+          Write-Host "=== cargo build (same crate/args as the CMake bridge step) ==="
+          cargo build --manifest-path "$crate/Cargo.toml" --release 2>&1 | Tee-Object -Variable cargoLog
+          $code = $LASTEXITCODE
+          Write-Host "=== cargo exit code: $code ==="
+          if ($code -ne 0) {
+            Write-Host "--- first errors ---"
+            $cargoLog | Select-String -Pattern "error(\[E\d+\])?:" -Context 0,6 | Select-Object -First 8 | ForEach-Object {
+              $_.Line
+              $_.Context.PostContext
+            }
+            Write-Host "--- rustc/cargo versions ---"
+            cargo --version
+            rustc --version
+          }
+
       - name: Build and package Windows app
         if: inputs.products != 'cli'
         shell: pwsh
