@@ -134,17 +134,24 @@ jobs:
       # real cause invisible. Build the same crate the CMake step builds, so a
       # Cargo error surfaces with its full message before the Flutter build starts.
       #
-      # This must not call `cargo` directly: common.run() and cargo_build.py both
-      # invoke models_dev_bundle.prepare_build_catalog() before Cargo, because
-      # operit-runtime's build.rs panics when the bundled models.dev catalog is
-      # absent ("Bundled models.dev catalog is missing"). Bypassing that helper
-      # leaves the catalog ungenerated and fails the real build later. Go through
-      # cargo_build.py, which performs the same preparation the CMake step does.
+      # This must not call `cargo` directly. operit-runtime's build.rs validates
+      # two gitignored, generated inputs before release compilation:
+      #   1. assets/models_dev/catalog.json.gz  -> models_dev_bundle.prepare_build_catalog()
+      #   2. assets/plugins/{buildin,external}  -> plugins/tools/sync_plugin_packages.py
+      # and panics on release builds when either is missing ("Bundled models.dev
+      # catalog is missing" / "Generated plugin assets ... do not match").
+      # CMake orders sync_operit_plugins before the bridge, and common.run() calls
+      # prepare_build_catalog before Cargo. Do the same here by running the sync
+      # first and then invoking cargo through cargo_build.py.
       - name: Preflight Rust bridge build
         if: inputs.products != 'cli'
         shell: pwsh
         continue-on-error: true
         run: |
+          Write-Host "=== sync plugin packages (what CMake's sync_operit_plugins does) ==="
+          python plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload 2>&1 | Select-Object -Last 30
+          Write-Host "=== sync exit code: $LASTEXITCODE ==="
+
           $crate = "apps/flutter/native/operit-flutter-bridge"
           Write-Host "=== cargo build via cargo_build.py (same path as the CMake bridge step) ==="
           $cargo = (Get-Command cargo).Source
@@ -153,7 +160,7 @@ jobs:
           Write-Host "=== cargo exit code: $code ==="
           if ($code -ne 0) {
             Write-Host "--- error lines ---"
-            $cargoLog | Select-String -Pattern "error(\[E\d+\])?:|panicked at|Caused by:|models\.dev" | Select-Object -First 20 | ForEach-Object { $_.Line }
+            $cargoLog | Select-String -Pattern "error(\[E\d+\])?:|panicked at|Caused by:|models\.dev|do not match|missing assets|stale assets" | Select-Object -First 20 | ForEach-Object { $_.Line }
             Write-Host "--- rustc/cargo versions ---"
             cargo --version
             rustc --version
