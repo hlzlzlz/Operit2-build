@@ -95,6 +95,36 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # The built-in character_cards plugin bundles a USearch WebAssembly module
+      # that is generated at build time (resources/usearch.wasm is gitignored).
+      # plugins/.../vendor/usearch/build.py compiles it with Emscripten and fails
+      # with "USearch requires Emscripten: install .ci-tools/emsdk or set EMXX"
+      # when the pinned SDK is absent. check_build_environment.py only asserts
+      # EMSDK for the esp32 product, so nothing else provisions it for App builds.
+      - name: Install Emscripten SDK
+        if: inputs.products != 'cli'
+        shell: pwsh
+        run: |
+          $emsdkVersion = "3.1.61"
+          $target = ".ci-tools/emsdk"
+          if (Test-Path "$target/upstream/emscripten/em++.py") {
+            Write-Host "Emscripten already present"
+          } else {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            git clone --depth 1 --branch $emsdkVersion https://github.com/emscripten-core/emsdk.git $target
+            Push-Location $target
+            try {
+              ./emsdk install $emsdkVersion
+              ./emsdk activate $emsdkVersion
+            } finally {
+              Pop-Location
+            }
+          }
+          if (-not (Test-Path "$target/upstream/emscripten/em++.py")) {
+            throw "Emscripten was not provisioned at $target"
+          }
+          Write-Host "Emscripten ready at $target"
+
       - name: Check build environment
         shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products "${{ inputs.products }}" --cli-arches "${{ inputs.cli_arches }}" --github-runner
