@@ -80,7 +80,12 @@ class WindowsApplicationUpdateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="operit update 中文 '")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # tempfile can hand back an 8.3 short path (e.g. C:\Users\RUNNER~1\...)
+        # because TMP is configured with the short user profile name. PowerShell
+        # reports the long form it resolves to, so assertions built from the short
+        # path never match on hosted Windows runners. Resolve first so both sides
+        # use the same canonical spelling.
+        self.root = Path(self.temporary.name).resolve()
 
     # Run the production PowerShell functions with isolated providers and capture failures.
     def run_script(self, body, expected_code=0):
