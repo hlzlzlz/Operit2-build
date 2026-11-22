@@ -29,7 +29,11 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-2025
-    timeout-minutes: 90
+    # The App build alone takes ~76 minutes on a cold cache (Rust bridge,
+    # USearch WASM, Flutter release assembly), which overran the previous
+    # 90-minute job limit once the CLI and upload steps were added. Raise the
+    # ceiling so a cold build can finish and still upload its artifacts.
+    timeout-minutes: 180
     env:
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
