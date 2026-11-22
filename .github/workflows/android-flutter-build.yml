@@ -1,0 +1,239 @@
+name: Android Flutter Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Android runtime build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison \
+            build-essential \
+            bzip2 \
+            ca-certificates \
+            curl \
+            diffutils \
+            flex \
+            gawk \
+            gzip \
+            patch \
+            pkg-config \
+            tar \
+            unzip \
+            xz-utils
+
+      - name: Fetch Android runtime sources
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
+
+      - name: Fetch Android NDK
+        run: bash tools/android-runtime/fetch_ndk_wsl.sh
+
+      - name: Build Android terminal runtime
+        run: |
+          export ANDROID_NDK_HOME="$HOME/.cache/operit-android-runtime/android-ndk-r29-beta4"
+          bash tools/android-runtime/build_android_tools_wsl.sh
+          bash tools/android-runtime/build_alpine_rootfs_wsl.sh
+
+      - name: Upload Android terminal runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: |
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-android:
+    needs: build-android-runtime
+    # V8's own GN config asserts host_os == "linux" when target_os is android
+    # ("Android builds are only supported on Linux"), so the APK cannot be
+    # produced on a Windows host even though the rest of the chain runs there.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -Awarnings
+      RUST_TOOLCHAIN_VERSION: 1.95.0
+      FVM_VERSION: 4.3.0
+      # No LLVM override here on purpose. OPERIT_ANDROID_V8_LLVM must name a
+      # root containing bin/clang (llvm-21-dev ships no clang driver), and
+      # OPERIT_LIBCLANG_DIR is only read on Windows. Left unset,
+      # prepare_android_v8.py takes its documented hermetic default and
+      # downloads Chromium's own clang, while find_libclang discovers LLVM 21 in
+      # /usr/lib/llvm-21/lib on its own.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Android terminal runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: operit2-android-runtime-${{ github.sha }}
+          path: apps/flutter/app/android/app/src/main
+
+      # The source-built V8 needs libclang 21.1+ and ld.lld; Ubuntu 24.04 ships
+      # LLVM 18, so pull the LLVM 21 toolchain from apt.llvm.org.
+      #
+      # The desktop GTK/GStreamer/WebKit development packages are deliberately
+      # NOT installed: an Android build links against none of them, and the
+      # probe cannot pass on Ubuntu anyway because gstreamer-1.0.pc declares
+      # `Requires: libunwind` while the distro only ships libunwind-18.pc. The
+      # environment check is invoked with --skip-desktop-linux-packages.
+      - name: Install LLVM 21 and native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg lsb-release ninja-build pkg-config \
+            unzip zip xz-utils python3-venv libc++-dev libc++abi-dev cmake
+          # llvm-src-release.asc does not exist on apt.llvm.org (404); the
+          # published key is llvm-snapshot.gpg.key.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-21-dev lld-21 libclang-21-dev
+          llvm-config-21 --version
+          ls /usr/lib/llvm-21/lib/libclang.so* | head -1
+          # find_lld also probes /usr/bin/ld.lld; keep that path available so
+          # the probe does not depend on the llvm-21 glob alone.
+          sudo ln -sf /usr/lib/llvm-21/bin/ld.lld /usr/bin/ld.lld
+          ld.lld --version
+
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install FVM
+        run: |
+          dart pub global activate fvm "$FVM_VERSION"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+
+      # The Flutter build hook and the Gradle plugin-sync hook regenerate
+      # ToolPkg assets through plugins/tools/sync_plugin_packages.py. That
+      # script requires both the repository-managed TypeScript compiler and
+      # Corepack/pnpm for the built-in workflow package; deploy-web-experience.yml
+      # provisions the same two, and without them the Android build fails in
+      # "Build and package Android app".
+      #
+      # Gradle's :app:syncOperitPlugins resolves the interpreter at
+      # <repo>/.venv/bin/python on Linux, so that virtualenv has to exist
+      # before Gradle starts; nothing else creates it.
+      - name: Prepare build-hook toolchain
+        run: |
+          python3 -m venv .venv
+          npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.9.3
+          corepack enable pnpm
+          corepack pnpm --version
+
+      - name: Install built-in workflow plugin dependencies
+        working-directory: plugins/packages/buildin/workflow
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Install project Flutter SDK
+        working-directory: apps/flutter/app
+        run: fvm install --skip-pub-get
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Restore Android signing material
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD \
+                      ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub Actions secret: $name" >&2
+              exit 1
+            fi
+          done
+          secrets_dir="tools/release/secrets"
+          mkdir -p "$secrets_dir"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > "$secrets_dir/operit2-release.keystore"
+          cat > "$secrets_dir/android-signing.properties" <<EOF
+          RELEASE_STORE_FILE=operit2-release.keystore
+          RELEASE_STORE_PASSWORD=$ANDROID_RELEASE_STORE_PASSWORD
+          RELEASE_KEY_ALIAS=$ANDROID_RELEASE_KEY_ALIAS
+          RELEASE_KEY_PASSWORD=$ANDROID_RELEASE_KEY_PASSWORD
+          EOF
+
+      - name: Cache source-built Android V8
+        uses: actions/cache@v4
+        with:
+          path: tools/release/work/android-v8
+          key: ${{ runner.os }}-${{ runner.arch }}-android-v8-${{ hashFiles('tools/build_scripts/prepare_android_v8.py', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock') }}
+
+      - name: Check build environment
+        run: python3 tools/build_scripts/check_build_environment.py --products app --github-runner --skip-desktop-linux-packages
+
+      - name: Build and package Android app
+        run: |
+          version="$(sed -nE 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)\+([0-9]+)[[:space:]]*$/\1 \2/p' apps/flutter/app/pubspec.yaml)"
+          if [ "$(printf '%s' "$version" | grep -c . || true)" -ne 1 ]; then
+            echo "apps/flutter/app/pubspec.yaml must contain exactly one release version line" >&2
+            exit 1
+          fi
+          set -- $version
+          python3 tools/build_scripts/build_flutter_android.py --build-name "$1" --build-number "$2" --enforce-lockfile
+
+      - name: Build and package Android module
+        run: python3 tools/build_scripts/build_android_module_release.py --enforce-lockfile
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-${{ github.sha }}
+          path: tools/release/dist/operit2-app-android-arm64-v8a-*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Android module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-module-${{ github.sha }}
+          path: tools/release/dist/operit2-module-android-arm64-v8a-*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
