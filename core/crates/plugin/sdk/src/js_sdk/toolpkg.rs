@@ -483,14 +483,17 @@ pub struct ToolPkgJsonObject {
 pub enum ToolPkgAppLifecycleEvent {
     #[serde(rename = "application_on_create")]
     ApplicationOnCreate,
+    /// The main UI is shown. Replayed at registration when this is the current state.
     #[serde(rename = "application_on_foreground")]
     ApplicationOnForeground,
+    /// The main UI is hidden/minimized or its scene/tab is backgrounded; never mere focus loss.
     #[serde(rename = "application_on_background")]
     ApplicationOnBackground,
     #[serde(rename = "application_on_low_memory")]
     ApplicationOnLowMemory,
     #[serde(rename = "application_on_trim_memory")]
     ApplicationOnTrimMemory,
+    /// An orderly runtime termination notification, when available. UI detach is not termination.
     #[serde(rename = "application_on_terminate")]
     ApplicationOnTerminate,
     #[serde(rename = "activity_on_create")]
@@ -1610,6 +1613,10 @@ pub struct ToolPkgChatRuntimeEventPayload {
     pub base_json_object: ToolPkgJsonObject,
     /// Identifies the conversation whose state changed.
     pub chatId: String,
+    /// Title of the real work item owned by this execution, when available.
+    pub taskTitle: Option<String>,
+    /// Actual model response rounds in the current execution; not tool invocation count.
+    pub currentRound: f64,
     /// Identifies the runtime slot that owns the chat.
     pub slot: ToolPkgChatRuntimeSlotName,
     /// Identifies the current observable processing state.
@@ -2209,7 +2216,12 @@ pub struct ToolPkgDesktopWidgetRegistration {
     /// Controls relative placement in the host UI.
     pub order: Option<f64>,
 }
-/// Binds an application lifecycle event to a plugin callback.
+/// Binds an application lifecycle event to a durable plugin callback.
+/// Application foreground/background describe the main UI, across all platforms:
+/// minimized/hidden desktop windows, background mobile scenes and hidden Web tabs
+/// are background. Focus loss, occlusion and plugin windows never change this state.
+/// New registrations receive application creation and the latest known foreground
+/// or background state. No raw host-event subscription or visibility query is needed.
 pub struct ToolPkgAppLifecycleHookRegistration {
     /// Uniquely identifies this app lifecycle hook registration within the package.
     pub id: String,
@@ -2874,6 +2886,15 @@ pub struct ToolPkgSummaryGenerateHookRegistration {
     /// Provides the callback invoked for this summary generate hook registration.
     pub function: ToolPkgSummaryGenerateHookHandler,
 }
+/// Describes one declared argument of a ToolPkg slash command.
+pub struct ToolPkgCoreCommandArgDeclaration {
+    /// Names the argument as shown by command completion surfaces.
+    pub name: String,
+    /// Marks whether the command cannot run without this argument; defaults to true when omitted.
+    pub required: Option<bool>,
+    /// Lists the known literal values offered by command completion surfaces.
+    pub options: Option<Vec<String>>,
+}
 /// Describes a slash command implemented by a ToolPkg callback.
 pub struct ToolPkgCoreCommandRegistration {
     /// Uniquely identifies this command registration within the package.
@@ -2886,6 +2907,8 @@ pub struct ToolPkgCoreCommandRegistration {
     pub description: ToolPkgLocalizedText,
     /// Documents the command usage displayed by command discovery surfaces.
     pub usage: String,
+    /// Declares structured argument metadata for command completion; omitted for legacy commands.
+    pub args: Option<Vec<ToolPkgCoreCommandArgDeclaration>>,
     /// Provides the callback invoked when this command is executed.
     pub function: ToolPkgCoreCommandHandler,
 }
@@ -3296,7 +3319,9 @@ pub trait ToolPkgRegistryMethods: Send + Sync {
     fn registerNavigationEntry(&self, definition: ToolPkgNavigationEntryRegistration) -> ();
     /// Registers a plugin widget on the desktop surface.
     fn registerDesktopWidget(&self, definition: ToolPkgDesktopWidgetRegistration) -> ();
-    /// Registers a callback for an application or activity lifecycle event.
+    /// Registers a durable callback for an application or activity lifecycle event.
+    /// Application foreground/background use host-normalized main UI visibility,
+    /// independent of focus and plugin windows; activation replays the latest state.
     fn registerAppLifecycleHook(&self, definition: ToolPkgAppLifecycleHookRegistration) -> ();
     /// Registers a callback that inspects or transforms messages.
     fn registerMessageProcessingPlugin(

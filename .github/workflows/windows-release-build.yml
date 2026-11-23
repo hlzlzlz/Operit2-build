@@ -30,9 +30,8 @@ jobs:
   build-windows:
     runs-on: windows-2025
     # The App build alone takes ~76 minutes on a cold cache (Rust bridge,
-    # USearch WASM, Flutter release assembly), which overran the previous
-    # 90-minute job limit once the CLI and upload steps were added. Raise the
-    # ceiling so a cold build can finish and still upload its artifacts.
+    # USearch WASM, Flutter release assembly), so a 90-minute ceiling expires
+    # right after it and cancels the CLI and artifact-upload steps.
     timeout-minutes: 180
     env:
       RUSTFLAGS: -Awarnings
@@ -59,12 +58,10 @@ jobs:
           dart pub global activate fvm $env:FVM_VERSION
           "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      # The Flutter build hook and the Gradle/MSBuild plugin-sync hook
-      # regenerate ToolPkg assets through plugins/tools/sync_plugin_packages.py.
-      # That script needs the repository-managed TypeScript compiler and
-      # Corepack/pnpm, and Gradle-style tooling resolves the interpreter at
-      # <repo>/.venv/Scripts/python.exe. deploy-web-experience.yml provisions
-      # the same set; the Windows workflow never did.
+      # The Flutter build hook and the Gradle/MSBuild plugin-sync hook regenerate
+      # ToolPkg assets through plugins/tools/sync_plugin_packages.py. That script
+      # needs the repository-managed TypeScript compiler and Corepack/pnpm, and
+      # tooling resolves the interpreter at <repo>/.venv/Scripts/python.exe.
       - name: Prepare build-hook toolchain
         shell: pwsh
         run: |
@@ -100,20 +97,17 @@ jobs:
           dotnet-version: '8.0.x'
 
       # The built-in character_cards plugin bundles a USearch WebAssembly module
-      # that is generated at build time (resources/usearch.wasm is gitignored).
-      # plugins/.../vendor/usearch/build.py compiles it with Emscripten and fails
-      # with "USearch requires Emscripten: install .ci-tools/emsdk or set EMXX"
-      # when the pinned SDK is absent. check_build_environment.py only asserts
-      # EMSDK for the esp32 product, so nothing else provisions it for App builds.
+      # generated at build time (resources/usearch.wasm is gitignored).
+      # vendor/usearch/build.py compiles it with Emscripten and fails with
+      # "USearch requires Emscripten: install .ci-tools/emsdk or set EMXX" when
+      # the pinned SDK is absent.
       - name: Install Emscripten SDK
         if: inputs.products != 'cli'
         shell: pwsh
         run: |
           $emsdkVersion = "3.1.61"
           $target = ".ci-tools/emsdk"
-          if (Test-Path "$target/upstream/emscripten/em++.py") {
-            Write-Host "Emscripten already present"
-          } else {
+          if (-not (Test-Path "$target/upstream/emscripten/em++.py")) {
             New-Item -ItemType Directory -Force -Path $target | Out-Null
             git clone --depth 1 --branch $emsdkVersion https://github.com/emscripten-core/emsdk.git $target
             Push-Location $target
@@ -142,11 +136,9 @@ jobs:
       # two gitignored, generated inputs before release compilation:
       #   1. assets/models_dev/catalog.json.gz  -> models_dev_bundle.prepare_build_catalog()
       #   2. assets/plugins/{buildin,external}  -> plugins/tools/sync_plugin_packages.py
-      # and panics on release builds when either is missing ("Bundled models.dev
-      # catalog is missing" / "Generated plugin assets ... do not match").
-      # CMake orders sync_operit_plugins before the bridge, and common.run() calls
-      # prepare_build_catalog before Cargo. Do the same here by running the sync
-      # first and then invoking cargo through cargo_build.py.
+      # and panics on release builds when either is missing. CMake orders
+      # sync_operit_plugins before the bridge, and common.run() calls
+      # prepare_build_catalog before Cargo; do the same here.
       - name: Preflight Rust bridge build
         if: inputs.products != 'cli'
         shell: pwsh

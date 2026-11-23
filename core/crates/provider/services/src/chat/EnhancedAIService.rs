@@ -99,6 +99,8 @@ pub struct EnhancedAIService {
 
 #[derive(Clone, Debug, Default)]
 pub struct EnhancedAISharedState {
+    /// Actual model response rounds in the current main send.
+    pub responseRound: i32,
     pub turn_token_usage: TurnTokenUsage,
     pub request_window_estimate: Option<i64>,
     pub active_execution_contexts: BTreeMap<i32, MessageExecutionContext>,
@@ -1784,6 +1786,7 @@ impl EnhancedAIService {
 
         let mut lifecycle = Vec::new();
         if !isSubTask {
+            self.shared_state().responseRound = 0;
             lifecycle.push(SendMessageLifecycleStage::SetProcessingState);
             self.setInputProcessingState(InputProcessingState::Processing {
                 message: "enhanced_processing_message".to_string(),
@@ -2053,6 +2056,7 @@ impl EnhancedAIService {
         });
         lifecycle.push(SendMessageLifecycleStage::StartAssistantResponseRound);
         self.startAssistantResponseRound(&mut execContext);
+        if !isSubTask { self.shared_state().responseRound = execContext.roundManager.roundIndex; }
 
         lifecycle.push(SendMessageLifecycleStage::CollectResponseStream);
         let mut totalChars = 0;
@@ -2432,6 +2436,7 @@ impl EnhancedAIService {
             return Ok(false);
         }
         self.startAssistantResponseRound(context);
+        if !isSubTask { self.shared_state().responseRound = context.roundManager.roundIndex; }
         AppLogger::v_with_level(
             TAG,
             &format!(
@@ -2979,7 +2984,7 @@ impl EnhancedAIService {
         let toolBatch = context.awaitExecution(
             ToolExecutionManager::executeInvocations(
                 &toolInvocations,
-                &mut self.tool_handler,
+                &self.tool_handler,
                 participantName.clone(),
                 chatId.clone(),
                 participantId.clone(),
@@ -3284,7 +3289,7 @@ fn resolveToolDisplayName(tool: &RuntimeAITool) -> String {
 fn buildPackageProxyToolPrompt() -> ToolPrompt {
     ToolPrompt {
         name: "package_proxy".to_string(),
-        description: "Proxy tool for package tools activated by use_package.".to_string(),
+        description: "Execute an activated package tool. Every call returns execution_id and waits up to 20 seconds. A running execution continues in the background; collect further output and final results with package_wait instead of re-running the tool.".to_string(),
         parameters: buildToolParametersJson(&[
             crate::chat::config::SystemToolPrompts::ToolParameterSchema {
                 name: "tool_name".to_string(),
@@ -3301,6 +3306,11 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
                 description: "JSON object of parameters to forward to the target tool".to_string(),
                 required: true,
                 default: None,
+            },
+            crate::chat::config::SystemToolPrompts::ToolParameterSchema {
+                name: "timeout_ms".to_string(), value_type: "integer".to_string(),
+                description: "Foreground wait from 0 to 20000 milliseconds, default 20000. Expiry keeps the execution running; 0 returns immediately.".to_string(),
+                required: false, default: Some("20000".to_string()),
             },
         ]),
         parametersStructured: Some(vec![
@@ -3319,6 +3329,11 @@ fn buildPackageProxyToolPrompt() -> ToolPrompt {
                 description: "JSON object of parameters to forward to the target tool".to_string(),
                 required: true,
                 default: None,
+            },
+            ToolParameterSchema {
+                name: "timeout_ms".to_string(), r#type: "integer".to_string(),
+                description: "Foreground wait from 0 to 20000 milliseconds, default 20000; expiry keeps execution running.".to_string(),
+                required: false, default: Some("20000".to_string()),
             },
         ]),
         details: String::new(),

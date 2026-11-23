@@ -19,16 +19,7 @@ busybox_src="$source_dir/busybox-1.38.0"
 proot_src="$source_dir/proot-5.1.107.78"
 proot_operit_src="$source_dir/termux-proot-operit"
 proot_patch="$runtime_dir/patches/termux-proot-operit-android.patch"
-# talloc is vendored so the build does not depend on samba.org, which is
-# routinely unreachable (503) from CI and from the maintainer's network. The
-# vendored tree is talloc 2.4.2: 2.4.3 differs only by a 4-line comment in
-# talloc.c and an identical talloc.h, so the compiled output is equivalent.
-talloc_vendor="$runtime_dir/vendor/talloc"
-if [ -d "$talloc_vendor" ]; then
-    talloc_src="$talloc_vendor"
-else
-    talloc_src="$source_dir/talloc-2.4.3"
-fi
+talloc_src="$source_dir/talloc-2.4.3"
 bash_src="$source_dir/bash-5.2.37"
 
 require_path() {
@@ -586,9 +577,6 @@ require_path "$toolchain_dir"
 require_path "$busybox_src"
 require_path "$proot_src"
 require_path "$talloc_src"
-require_path "$talloc_src/talloc.c"
-require_path "$talloc_src/talloc.h"
-require_path "$talloc_src/lib/replace/replace.h"
 require_path "$bash_src"
 
 mkdir -p "$asset_dir" "$jni_libs_dir"

@@ -39,11 +39,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wsl-distro", default="FedoraLinux-43")
     parser.add_argument("--github-dispatch", action="store_true", help="Check local GitHub CLI access for cloud build dispatch.")
     parser.add_argument("--github-runner", action="store_true", help="Check requirements expected inside a GitHub-hosted runner job.")
-    parser.add_argument(
-        "--skip-desktop-linux-packages",
-        action="store_true",
-        help="Skip the desktop GTK/GStreamer/WebKit packages for Android-only builds on Linux.",
-    )
     return parser.parse_args()
 
 
@@ -197,7 +192,7 @@ def check_esp32_tools() -> list[CheckResult]:
 
 
 # Checks native platform tools for desktop App builds.
-def check_native_app_tools(include_ios: bool, skip_desktop_linux_packages: bool = False) -> list[CheckResult]:
+def check_native_app_tools(include_ios: bool) -> list[CheckResult]:
     platform_name = host_platform()
     results = []
     if platform_name == "windows":
@@ -211,26 +206,14 @@ def check_native_app_tools(include_ios: bool, skip_desktop_linux_packages: bool 
                 check_command("ninja", ["--version"]),
                 check_command("pkg-config", ["--version"]),
                 check_command("clang", ["--version"]),
+                check_pkg_config_package("gtk+-3.0"),
+                check_pkg_config_package("ayatana-appindicator3-0.1"),
+                check_pkg_config_package("gstreamer-1.0"),
+                check_pkg_config_package("gstreamer-app-1.0"),
+                check_pkg_config_package("gstreamer-audio-1.0"),
+                check_pkg_config_package("webkit2gtk-4.1"),
             ]
         )
-        # The desktop Flutter Linux target needs these GTK/GStreamer/WebKit
-        # development packages, but an Android-only build does not link against
-        # any of them. They are skipped for Android because the check cannot be
-        # satisfied there: Ubuntu's gstreamer-1.0.pc declares
-        # `Requires: libunwind`, while the distribution only ships a versioned
-        # libunwind-18.pc, so `pkg-config --exists gstreamer-1.0` fails even
-        # with every gstreamer development package installed.
-        if not skip_desktop_linux_packages:
-            results.extend(
-                [
-                    check_pkg_config_package("gtk+-3.0"),
-                    check_pkg_config_package("ayatana-appindicator3-0.1"),
-                    check_pkg_config_package("gstreamer-1.0"),
-                    check_pkg_config_package("gstreamer-app-1.0"),
-                    check_pkg_config_package("gstreamer-audio-1.0"),
-                    check_pkg_config_package("webkit2gtk-4.1"),
-                ]
-            )
     elif platform_name == "macos":
         results.extend([check_command("xcodebuild", ["-version"]), check_command("xcrun", ["--version"]), check_command("ditto")])
         if include_ios:
@@ -319,7 +302,7 @@ def check_github_dispatch_tools() -> list[CheckResult]:
 def build_checks(args: argparse.Namespace) -> list[CheckResult]:
     checks = check_common_tools(args.products)
     if args.products in ("app", "all"):
-        checks.extend(check_native_app_tools(args.include_ios, args.skip_desktop_linux_packages))
+        checks.extend(check_native_app_tools(args.include_ios))
     if args.products in ("cli", "all"):
         checks.extend(check_cli_rust_targets(host_platform(), args.cli_arches))
         checks.extend(check_windows_aarch64_cli(args.cli_arches))

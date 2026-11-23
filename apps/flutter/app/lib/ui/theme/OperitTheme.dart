@@ -75,6 +75,7 @@ class _OperitThemeState extends State<OperitTheme> {
   Future<void> _zoomSave = Future<void>.value();
   StreamSubscription<LongPastedTextInputSettings>? _longPasteSubscription;
   StreamSubscription<bool?>? _enterSendsMessageSubscription;
+  StreamSubscription<bool>? _chatScrollNavigatorOnLeftSubscription;
   late final OperitThemeController _controller = OperitThemeController(
     onChanged: () {
       if (mounted) {
@@ -170,12 +171,24 @@ class _OperitThemeState extends State<OperitTheme> {
       final zoom = await _zoomPreferences.load();
       final enterSendsMessage = await const UserPreferencesManager()
           .loadEnterSendsMessage();
+      final chatScrollNavigatorOnLeft = await const UserPreferencesManager()
+          .loadChatScrollNavigatorOnLeft();
       if (!mounted ||
           generation != _runtimeGeneration ||
           !_runtimeManager.runtimeConfigured) {
         return;
       }
       UserPreferencesManager.enterSendsMessage.value = enterSendsMessage;
+      UserPreferencesManager.chatScrollNavigatorOnLeft.value =
+          chatScrollNavigatorOnLeft;
+      _chatScrollNavigatorOnLeftSubscription = const UserPreferencesManager()
+          .chatScrollNavigatorOnLeftFlow()
+          .listen((enabled) {
+            if (!mounted || generation != _runtimeGeneration) {
+              return;
+            }
+            UserPreferencesManager.chatScrollNavigatorOnLeft.value = enabled;
+          });
       _longPasteSubscription = const UserPreferencesManager()
           .longPastedTextInputSettingsFlow()
           .listen((settings) {
@@ -228,6 +241,8 @@ class _OperitThemeState extends State<OperitTheme> {
     _longPasteSubscription = null;
     unawaited(_enterSendsMessageSubscription?.cancel());
     _enterSendsMessageSubscription = null;
+    unawaited(_chatScrollNavigatorOnLeftSubscription?.cancel());
+    _chatScrollNavigatorOnLeftSubscription = null;
   }
 
   /// Starts reading Android native runtime stages while Core-backed UI is starting.
@@ -302,11 +317,11 @@ class _OperitThemeState extends State<OperitTheme> {
       controller: _controller,
       child: DesktopWindowChrome(
         themeMode: themeMode,
-        lightColorScheme: _seedColorScheme(
+        lightColorScheme: operitColorScheme(
           Brightness.light,
           _controller.themePreferenceSnapshot,
         ),
-        darkColorScheme: _seedColorScheme(
+        darkColorScheme: operitColorScheme(
           Brightness.dark,
           _controller.themePreferenceSnapshot,
         ),
@@ -346,11 +361,11 @@ class _OperitThemeState extends State<OperitTheme> {
                 key: const ValueKey('appearance-status'),
                 title: 'Operit2',
                 themePreferenceSnapshot: _controller.themePreferenceSnapshot,
-                lightColorScheme: _seedColorScheme(
+                lightColorScheme: operitColorScheme(
                   Brightness.light,
                   _controller.themePreferenceSnapshot,
                 ),
-                darkColorScheme: _seedColorScheme(
+                darkColorScheme: operitColorScheme(
                   Brightness.dark,
                   _controller.themePreferenceSnapshot,
                 ),
@@ -418,11 +433,11 @@ class _OperitMaterialApp extends StatelessWidget {
   /// Builds the themed application and process-wide host overlays.
   @override
   Widget build(BuildContext context) {
-    final lightColorScheme = _seedColorScheme(
+    final lightColorScheme = operitColorScheme(
       Brightness.light,
       themePreferenceSnapshot,
     );
-    final darkColorScheme = _seedColorScheme(
+    final darkColorScheme = operitColorScheme(
       Brightness.dark,
       themePreferenceSnapshot,
     );
@@ -1215,7 +1230,7 @@ class _OperitThemePreviewState extends State<OperitThemePreview> {
             diagnostics: _assetDiagnostics,
             child: Theme(
               data: buildOperitThemeData(
-                _seedColorScheme(brightness, snapshot),
+                operitColorScheme(brightness, snapshot),
                 snapshot,
                 fontFamily: _fontFamily(snapshot),
                 fontFamilyFallback: _fontFamilyFallback(snapshot),
@@ -1875,8 +1890,8 @@ const List<String> _monospaceFontFamilyFallback = <String>[
 
 const Color _brandSeedColor = Color(0xFF3B82F6);
 
-/// Builds one Material color scheme and applies the secondary accent color.
-ColorScheme _seedColorScheme(
+/// Resolves the application's Material palette for the requested brightness.
+ColorScheme operitColorScheme(
   Brightness brightness,
   ThemePreferenceSnapshot themePreferenceSnapshot,
 ) {
@@ -1887,27 +1902,69 @@ ColorScheme _seedColorScheme(
       brightness,
     );
   }
-  final seedColor =
+  final customPrimary =
       themePreferenceSnapshot.useCustomColors &&
           themePreferenceSnapshot.customPrimaryColor != null
       ? Color(themePreferenceSnapshot.customPrimaryColor!)
-      : _brandSeedColor;
-  final scheme = ColorScheme.fromSeed(
-    seedColor: seedColor,
-    brightness: brightness,
-    dynamicSchemeVariant: DynamicSchemeVariant.tonalSpot,
-  );
-
-  final isDark = brightness == Brightness.dark;
+      : null;
+  final seedColor = customPrimary ?? _brandSeedColor;
   final customSecondary =
       themePreferenceSnapshot.useCustomColors &&
           themePreferenceSnapshot.customSecondaryColor != null
       ? Color(themePreferenceSnapshot.customSecondaryColor!)
       : null;
+  final monochrome =
+      _isGrayscaleThemeColor(seedColor) &&
+      (customSecondary == null || _isGrayscaleThemeColor(customSecondary));
+  var scheme = ColorScheme.fromSeed(
+    seedColor: seedColor,
+    brightness: brightness,
+    dynamicSchemeVariant: _isGrayscaleThemeColor(seedColor)
+        ? DynamicSchemeVariant.monochrome
+        : customPrimary == null
+        ? DynamicSchemeVariant.tonalSpot
+        : DynamicSchemeVariant.fidelity,
+  );
+
+  if (customPrimary != null) {
+    final foreground = _themeAccentForeground(customPrimary);
+    scheme = scheme.copyWith(
+      primary: customPrimary,
+      onPrimary: foreground,
+      primaryContainer: customPrimary,
+      onPrimaryContainer: foreground,
+      surfaceTint: customPrimary,
+    );
+  }
+  if (customSecondary != null) {
+    final secondaryScheme = ColorScheme.fromSeed(
+      seedColor: customSecondary,
+      brightness: brightness,
+      dynamicSchemeVariant: _isGrayscaleThemeColor(customSecondary)
+          ? DynamicSchemeVariant.monochrome
+          : DynamicSchemeVariant.fidelity,
+    );
+    final foreground = _themeAccentForeground(customSecondary);
+    scheme = scheme.copyWith(
+      secondary: customSecondary,
+      onSecondary: foreground,
+      secondaryContainer: customSecondary,
+      onSecondaryContainer: foreground,
+      secondaryFixed: secondaryScheme.primaryFixed,
+      secondaryFixedDim: secondaryScheme.primaryFixedDim,
+      onSecondaryFixed: secondaryScheme.onPrimaryFixed,
+      onSecondaryFixedVariant: secondaryScheme.onPrimaryFixedVariant,
+    );
+  }
+
+  // Preserve neutral surfaces when both selected accents are grayscale.
+  if (monochrome) {
+    return scheme;
+  }
 
   // Decouple neutral surface tones from seed color to eliminate cyan/teal tint,
   // providing a clean, professional neutral dark palette and crisp neutral light palette.
-  if (isDark) {
+  if (brightness == Brightness.dark) {
     return scheme.copyWith(
       surface: const Color(0xFF161616),
       surfaceDim: const Color(0xFF121212),
@@ -1921,7 +1978,6 @@ ColorScheme _seedColorScheme(
       outlineVariant: const Color(0xFF262628),
       onSurface: const Color(0xFFECECEC),
       onSurfaceVariant: const Color(0xFFA0A1A7),
-      secondary: customSecondary ?? scheme.secondary,
     );
   } else {
     return scheme.copyWith(
@@ -1937,7 +1993,18 @@ ColorScheme _seedColorScheme(
       outlineVariant: const Color(0xFFE2E4E8),
       onSurface: const Color(0xFF1B1C1E),
       onSurfaceVariant: const Color(0xFF5A5C63),
-      secondary: customSecondary ?? scheme.secondary,
     );
   }
+}
+
+/// Identifies achromatic seed colors without treating dark chromatic colors as gray.
+bool _isGrayscaleThemeColor(Color color) =>
+    color.r == color.g && color.g == color.b;
+
+/// Chooses the black or white foreground with the higher WCAG contrast ratio.
+Color _themeAccentForeground(Color background) {
+  final luminance = background.computeLuminance();
+  final blackContrast = (luminance + 0.05) / 0.05;
+  final whiteContrast = 1.05 / (luminance + 0.05);
+  return blackContrast >= whiteContrast ? Colors.black : Colors.white;
 }

@@ -27,16 +27,6 @@ import tomllib
 import urllib.request
 import zipfile
 
-# Windows Python still defaults stdio to the ANSI code page (cp1252 on GitHub
-# runners), so any non-ASCII byte in a printed command or a captured tool
-# message aborts the build with UnicodeDecodeError. Reconfigure the streams to
-# UTF-8 with replacement instead of raising.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):
-        pass
-
 try:
     import fcntl
 except ImportError:  # Windows: Gradle serializes task execution instead.
@@ -95,19 +85,7 @@ def run(command, **kwargs):
 
 
 def output(command):
-    # Never let text=True pick the locale codec here: on Windows Python defaults
-    # to cp1252, and `cargo metadata` emits UTF-8 (paths and messages carry
-    # non-ASCII bytes), which crashed the Android build with
-    # "UnicodeDecodeError: 'charmap' codec can't decode byte 0x81". Decode as
-    # UTF-8 and never raise, so tool output cannot abort the build.
-    result = run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return (result.stdout or "").strip()
+    return run(command, capture_output=True, text=True).stdout.strip()
 
 
 def api_level():
@@ -365,14 +343,8 @@ def brew_prefix(formula):
         (str(p) for p in (Path("/opt/homebrew/bin/brew"), Path("/usr/local/bin/brew")) if p.is_file()), None)
     if not brew:
         return None
-    result = subprocess.run(
-        [brew, "--prefix", formula],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return Path((result.stdout or "").strip()) if result.returncode == 0 else None
+    result = subprocess.run([brew, "--prefix", formula], capture_output=True, text=True)
+    return Path(result.stdout.strip()) if result.returncode == 0 else None
 
 
 def find_host_clang():
@@ -405,12 +377,7 @@ def find_libclang():
         if not directory or not (directory / "libclang.dll").is_file():
             raise RuntimeError("Set OPERIT_LIBCLANG_DIR to the directory containing libclang.dll (21.1+)")
         return directory
-    # Two spellings are in use: `libclang.so*` (libclang.so, libclang.so.21) and
-    # `libclang-<major>.so` (Debian/Ubuntu ship libclang-21.so and
-    # libclang-21.1.8.so). A single `libclang.so*` glob silently misses the
-    # hyphen form, which is why discovery kept reporting "no libclang" on Ubuntu
-    # while libclang-21-dev was installed.
-    patterns = ("libclang.so*", "libclang-[0-9]*.so*")
+    pattern = "libclang.so*"
     if sys.platform == "darwin":
         llvm = find_host_clang()
         candidates = [llvm / "lib"]
@@ -420,27 +387,11 @@ def find_libclang():
         candidates += [Path("/usr/lib/x86_64-linux-gnu"), Path("/usr/lib64"), Path("/usr/lib")]
     libraries = []
     for directory in candidates:
-        for pattern in patterns:
-            libraries += sorted(directory.glob(pattern))
-    # Distributions disagree on how the SONAME major is spelled. Debian and
-    # Ubuntu ship libclang-21.so / libclang-21.1.8.so (hyphen), while other
-    # packagings use libclang.so.21. Accept both spellings.
-    versioned_major = re.compile(r"libclang(?:-|\.so\.)(\d+)")
+        libraries += sorted(directory.glob(pattern))
     for library in libraries:
-        match = versioned_major.search(library.name)
+        match = re.search(r"libclang\.so\.(\d+)", library.name)
         if match and int(match.group(1)) >= 21:
             return library.parent
-    # A bare libclang.so is only trusted next to a qualifying versioned file;
-    # otherwise an old system libclang would silently satisfy the requirement.
-    # An older sibling (libclang-18.so) must not unlock it, so re-test the major.
-    has_qualifying_version = any(
-        (match := versioned_major.search(library.name)) and int(match.group(1)) >= 21
-        for library in libraries
-    )
-    if has_qualifying_version:
-        for library in libraries:
-            if library.name == "libclang.so":
-                return library.parent
     if sys.platform == "darwin" and libraries:
         return libraries[0].parent
     raise RuntimeError(

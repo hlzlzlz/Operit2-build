@@ -43,12 +43,12 @@ import '../components/style/input/common/MentionTokenUtils.dart';
 import '../components/style/input/common/PendingQueueMessageItem.dart';
 import '../components/workspace/ChatContextStatsTopBarButton.dart';
 import '../components/workspace/WorkspaceLayoutMetrics.dart';
+import '../components/workspace/WorkspaceSession.dart';
 import '../components/workspace/WorkspaceTopBarButton.dart';
 import '../../../../core/host/LocalSpeechRecorder.dart';
 import '../viewmodel/ChatSelectionTransition.dart';
 import '../viewmodel/ChatViewModel.dart';
 
-bool _chatWorkspaceOpen = false;
 const String _localSttLogTag = 'LocalSTT';
 const String _packageAttachmentPrefix = 'package_attach:';
 const String _workspaceMentionAttachmentPrefix = 'workspace_mention:';
@@ -355,6 +355,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
   bool _isPreparingChatSwitch = false;
   String? _pendingChatSwitchTargetId;
   late bool _workspaceOpen;
+  late WorkspaceSession _workspaceSession;
   bool _isCurrentMainScreen = true;
   bool _topBarActionsUpdateScheduled = false;
   bool _pendingQueueEnqueueInFlight = false;
@@ -382,9 +383,10 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     );
     _autoScrollToBottomNotifier = ValueNotifier<bool>(_autoScrollToBottom);
     _toastMessageNotifier = ValueNotifier<String?>(_toastMessage);
-    _workspaceOpen = _chatWorkspaceOpen;
+    _workspaceSession = WorkspaceShell.session;
+    _workspaceOpen = _workspaceSession.isOpen;
     if (!widget.embedded) {
-      WorkspaceShell.session.onOpenRequested = _openWorkspace;
+      _workspaceSession.onOpenRequested = _openWorkspace;
     }
     _watchChatFlows();
     _watchToastEvent();
@@ -472,8 +474,8 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _mainLayoutController?.clearWorkspaceDockDestination(
       owner: _mainLayoutOwner,
     );
-    if (WorkspaceShell.session.onOpenRequested == _openWorkspace) {
-      WorkspaceShell.session.onOpenRequested = null;
+    if (_workspaceSession.onOpenRequested == _openWorkspace) {
+      _workspaceSession.onOpenRequested = null;
     }
     super.dispose();
   }
@@ -1021,12 +1023,18 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
       return;
     }
     _pendingQueueEnqueueInFlight = true;
+    final submittedAttachments = _attachments;
     try {
       await _viewModel.enqueuePendingQueueMessage(
         chatId: chatId,
         messageText: draftText,
+        attachments: submittedAttachments,
       );
       _clearSubmittedDraft(chatId, draftText);
+      if (!mounted || _currentChatId != chatId) {
+        return;
+      }
+      await _refreshAttachments();
       if (!mounted || _currentChatId != chatId) {
         return;
       }
@@ -1214,7 +1222,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
       text: queuedText,
       selectionStart: queuedText.length,
       selectionEnd: queuedText.length,
-      attachments: const [],
+      attachments: item.attachments,
       replyToMessageTimestamp: null,
     );
     if (decision != null) {
@@ -1279,6 +1287,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     await _viewModel.sendUserMessage(
       queuedText.trim(),
       chatIdOverride: queueChatId,
+      attachmentsOverride: item.attachments,
     );
     if (mounted && _currentChatId == queueChatId) {
       await _refreshAttachments();
@@ -1319,9 +1328,11 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _toastMessageNotifier.value = message;
   }
 
+  /// Publishes a composer snapshot only while its requesting chat remains selected.
   Future<void> _refreshAttachments() async {
+    final chatId = _currentChatId;
     final attachments = await _viewModel.attachments();
-    if (!mounted) {
+    if (!mounted || _currentChatId != chatId) {
       return;
     }
     _attachments = attachments;
@@ -1749,10 +1760,18 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
           _clearChatFlowError();
           _loading = false;
           _messages.clear();
-          WorkspaceShell.session.pluginHostState = const {};
           _currentChatId = null;
+          _currentWorkspacePath = null;
+          _currentFileDirectory = null;
+          _selectWorkspaceSession();
+          if (!widget.embedded) {
+            _workspaceSession.pluginHostState = const {};
+          }
           _inputProcessingState = core_proxy.InputProcessingState.idle();
         });
+        setState(() {});
+        _updateTopBarActions();
+        _mainLayoutController?.refreshAttachment(owner: _mainLayoutOwner);
       }
       return;
     }
@@ -1819,10 +1838,14 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     _messages
       ..clear()
       ..addAll(messages);
-    WorkspaceShell.session.pluginHostState = {
-      'chatId': _currentChatId,
-      'messages': [for (final message in messages) pluginMessageState(message)],
-    };
+    if (!widget.embedded) {
+      _workspaceSession.pluginHostState = {
+        'chatId': _currentChatId,
+        'messages': [
+          for (final message in messages) pluginMessageState(message),
+        ],
+      };
+    }
     if (_selectedMessageTimestamps.isNotEmpty) {
       final selectableTimestamps = messages
           .where((message) {
@@ -1883,10 +1906,6 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     if (chatChanged) {
       _saveCurrentInputDraft();
       _currentChatId = state.currentChatId;
-      WorkspaceShell.session.pluginHostState = {
-        'chatId': state.currentChatId,
-        'messages': const <Object?>[],
-      };
       _isMultiSelectMode = false;
       _selectedMessageTimestamps = const <int>{};
       _restoreInputDraftForChat(state.currentChatId);
@@ -1898,6 +1917,15 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     }
     _currentWorkspacePath = state.currentWorkspacePath;
     _currentFileDirectory = state.currentFileDirectory;
+    _selectWorkspaceSession();
+    if (!widget.embedded && (chatChanged || workspaceChanged)) {
+      _workspaceSession.pluginHostState = {
+        'chatId': state.currentChatId,
+        'messages': chatChanged
+            ? const <Object?>[]
+            : [for (final message in _messages) pluginMessageState(message)],
+      };
+    }
     final chatFlowErrorMessage = _chatFlowErrorMessage;
     if (_chatFlowError != null) {
       _loading = false;
@@ -2746,17 +2774,33 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     });
   }
 
+  /// Activates the selected chat's local workspace navigation and visibility.
+  void _selectWorkspaceSession() {
+    if (widget.embedded) return;
+    final next = WorkspaceShell.sessions.select(
+      workspacePath: _currentWorkspacePath,
+      chatId: _currentChatId,
+    );
+    if (identical(next, _workspaceSession)) return;
+    _workspaceSession.onOpenRequested = null;
+    _workspaceSession = next;
+    _workspaceSession.onOpenRequested = _openWorkspace;
+    _workspaceOpen = next.isOpen;
+  }
+
+  /// Toggles visibility for the selected workspace.
   void _toggleWorkspace() {
     _setWorkspaceOpen(!_workspaceOpen);
   }
 
+  /// Records visibility in the selected workspace's process-local session.
   void _setWorkspaceOpen(bool value) {
     if (_workspaceOpen == value) {
       return;
     }
     setState(() {
       _workspaceOpen = value;
-      _chatWorkspaceOpen = value;
+      _workspaceSession.isOpen = value;
     });
     _updateTopBarActions();
     _mainLayoutController?.refreshAttachment(owner: _mainLayoutOwner);
@@ -3002,6 +3046,7 @@ class _AIChatSurfaceState extends State<_AIChatSurface> {
     Widget child,
   ) {
     return WorkspaceShell(
+      workspaceSession: _workspaceSession,
       workspaceOpen: _workspaceOpen,
       onWorkspaceOpenChanged: _setWorkspaceOpen,
       currentChatId: _currentChatId,
