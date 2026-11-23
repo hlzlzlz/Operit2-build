@@ -162,6 +162,31 @@ jobs:
             rustc --version
           }
 
+      # pubspec.lock pins two OpenHarmony packages to gitee.com
+      # (path_provider_ohos, url_launcher_ohos), which is unreachable from some
+      # hosted runners at times:
+      #   fatal: unable to access 'https://gitee.com/openharmony-sig/
+      #   flutter_packages.git/': Recv failure: Connection was reset
+      # Warm the pub cache with bounded retries so a transient network failure
+      # does not abort the whole build.
+      - name: Warm pub cache for gitee-pinned dependencies
+        if: inputs.products != 'cli'
+        working-directory: apps/flutter/app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            Write-Host "=== pub get attempt $attempt ==="
+            fvm flutter pub get --enforce-lockfile
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "pub get succeeded on attempt $attempt"
+              exit 0
+            }
+            Write-Host "attempt $attempt failed with $LASTEXITCODE; retrying in $($attempt * 15)s"
+            Start-Sleep -Seconds ($attempt * 15)
+          }
+          throw "flutter pub get failed after 5 attempts (gitee.com may be unreachable)"
+
       - name: Build and package Windows app
         if: inputs.products != 'cli'
         shell: pwsh
