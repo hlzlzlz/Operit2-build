@@ -1232,11 +1232,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsCategoryGlobalBehaviorTitle => '全局行为设置';
 
   @override
-  String get settingsCategoryGlobalBehaviorSubtitle => '聊天布局、输入处理与交互';
+  String get settingsCategoryGlobalBehaviorSubtitle => '应用语言、聊天布局与输入交互';
 
   @override
   String get settingsCategoryGlobalBehaviorDescription =>
-      '设置应用全局的聊天布局、输入与交互行为。';
+      '选择应用语言，设置应用全局的聊天布局、输入与交互行为。';
 
   @override
   String get settingsCategoryAppearanceTitle => '外观与交互';
@@ -3252,6 +3252,33 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceFontMonospace => '等宽';
 
   @override
+  String get settingsAppearanceNormalFontSection => '普通字体';
+
+  @override
+  String get settingsAppearanceFontsSection => '字体';
+
+  @override
+  String get settingsAppearanceCodeFontSection => '代码字体';
+
+  @override
+  String get settingsAppearanceCodeFontDescription => '用于代码块、行内代码、diff、文件预览与终端';
+
+  @override
+  String get settingsAppearanceCodeFontBuiltin => '内置等宽';
+
+  @override
+  String get settingsAppearanceChatBodyFontSection => '聊天正文字体';
+
+  @override
+  String get settingsAppearanceChatBodyFontFollow => '跟随普通字体';
+
+  @override
+  String get settingsAppearanceChatBodySplitSides => '用户/AI 分开设置';
+
+  @override
+  String get settingsAppearanceChatBodyAdjust => '调整';
+
+  @override
   String get settingsAppearanceInterfaceScale => '界面缩放';
 
   @override
@@ -3512,13 +3539,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceResetTheme => '重置主题设置';
 
   @override
-  String get settingsAppearanceLanguageSection => '语言';
+  String get settingsAppLanguageTitle => '应用语言';
 
   @override
-  String get settingsAppearanceLanguage => '当前语言';
+  String get settingsAppLanguageSystem => '跟随系统';
 
   @override
-  String get settingsAppearanceLanguageDescription => '语言跟随应用启动时的本地化配置。';
+  String get settingsAppLanguageDescription => '选择后立即生效，无需重启应用。';
+
+  @override
+  String settingsAppLanguageSaveError(String error) {
+    return '无法保存应用语言：$error';
+  }
 
   @override
   String get settingsAppearanceBubblesTab => '消息与气泡';
@@ -5662,6 +5694,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get apiErrorInvalidParametersTitle => '请求参数有误';
+
+  @override
+  String get apiErrorReasoningContentTitle => '请使用支持思考回传的供应商';
+
+  @override
+  String get apiErrorReasoningContentMessage =>
+      '请求涉及 reasoning_content。请在模型设置中选择 DeepSeek、OpenAI 兼容等支持思考内容回传的供应商类型，并确认与当前 API 接口匹配。';
 
   @override
   String get apiErrorInvalidParametersMessage =>

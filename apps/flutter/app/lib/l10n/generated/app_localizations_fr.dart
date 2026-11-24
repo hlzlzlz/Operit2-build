@@ -1291,11 +1291,11 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get settingsCategoryGlobalBehaviorSubtitle =>
-      'Disposition du chat, saisie et interactions';
+      'Langue, disposition du chat et saisie';
 
   @override
   String get settingsCategoryGlobalBehaviorDescription =>
-      'Configurez la disposition du chat, la saisie et les interactions pour toute l\'application.';
+      'Choisissez la langue et configurez la disposition du chat, la saisie et les interactions pour toute l\'application.';
 
   @override
   String get settingsCategoryAppearanceTitle => 'Apparence et interactions';
@@ -3452,6 +3452,35 @@ class AppLocalizationsFr extends AppLocalizations {
   String get settingsAppearanceFontMonospace => 'Mono';
 
   @override
+  String get settingsAppearanceNormalFontSection => 'Body font';
+
+  @override
+  String get settingsAppearanceFontsSection => 'Fonts';
+
+  @override
+  String get settingsAppearanceCodeFontSection => 'Code font';
+
+  @override
+  String get settingsAppearanceCodeFontDescription =>
+      'Used by code blocks, inline code, diffs, file previews and the terminal';
+
+  @override
+  String get settingsAppearanceCodeFontBuiltin => 'Built-in mono';
+
+  @override
+  String get settingsAppearanceChatBodyFontSection => 'Chat text font';
+
+  @override
+  String get settingsAppearanceChatBodyFontFollow => 'Follows the body font';
+
+  @override
+  String get settingsAppearanceChatBodySplitSides =>
+      'Set user and AI separately';
+
+  @override
+  String get settingsAppearanceChatBodyAdjust => 'Adjust';
+
+  @override
   String get settingsAppearanceInterfaceScale => 'Échelle de l\'interface';
 
   @override
@@ -3738,14 +3767,19 @@ class AppLocalizationsFr extends AppLocalizations {
       'Réinitialiser les paramètres du thème';
 
   @override
-  String get settingsAppearanceLanguageSection => 'Langue';
+  String get settingsAppLanguageTitle => 'Langue de l’application';
 
   @override
-  String get settingsAppearanceLanguage => 'Langue actuelle';
+  String get settingsAppLanguageSystem => 'Suivre le système';
 
   @override
-  String get settingsAppearanceLanguageDescription =>
-      'La langue suit la configuration de localisation chargée au démarrage de l\'application.';
+  String get settingsAppLanguageDescription =>
+      'Les modifications s’appliquent immédiatement, sans redémarrage.';
+
+  @override
+  String settingsAppLanguageSaveError(String error) {
+    return 'Impossible d’enregistrer la langue : $error';
+  }
 
   @override
   String get settingsAppearanceBubblesTab => 'Messages et bulles';
@@ -6066,6 +6100,14 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get apiErrorInvalidParametersTitle =>
       'Paramètres de requête invalides';
+
+  @override
+  String get apiErrorReasoningContentTitle =>
+      'Utilisez un fournisseur prenant en charge le renvoi du raisonnement';
+
+  @override
+  String get apiErrorReasoningContentMessage =>
+      'La requête concerne reasoning_content. Dans les paramètres du modèle, sélectionnez un type de fournisseur prenant en charge le renvoi du contenu de raisonnement, comme DeepSeek ou Compatible OpenAI, et vérifiez qu’il correspond à votre API.';
 
   @override
   String get apiErrorInvalidParametersMessage =>

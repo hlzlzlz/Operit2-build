@@ -28,6 +28,7 @@ import '../window/DesktopWindowChrome.dart';
 import 'OperitThemeAssets.dart';
 import 'ThemeAppearanceErrorScreen.dart';
 import 'ThemeCircularRevealHost.dart';
+import 'ThemeColorPresets.dart';
 import 'ThemeVideoAssetLoader.dart';
 
 class OperitTheme extends StatefulWidget {
@@ -58,6 +59,13 @@ class OperitTheme extends StatefulWidget {
     return scope.controller;
   }
 
+  /// Returns the controller without throwing outside the theme scope.
+  static OperitThemeController? maybeOf(BuildContext context) {
+    final scope = context
+        .dependOnInheritedWidgetOfExactType<_OperitThemeScope>();
+    return scope?.controller;
+  }
+
   @override
   State<OperitTheme> createState() => _OperitThemeState();
 }
@@ -75,6 +83,7 @@ class _OperitThemeState extends State<OperitTheme> {
   Future<void> _zoomSave = Future<void>.value();
   StreamSubscription<LongPastedTextInputSettings>? _longPasteSubscription;
   StreamSubscription<bool?>? _enterSendsMessageSubscription;
+  StreamSubscription<AppLanguage>? _appLanguageSubscription;
   StreamSubscription<bool>? _chatScrollNavigatorOnLeftSubscription;
   late final OperitThemeController _controller = OperitThemeController(
     onChanged: () {
@@ -99,6 +108,7 @@ class _OperitThemeState extends State<OperitTheme> {
   @override
   void initState() {
     super.initState();
+    UserPreferencesManager.appLanguage.addListener(_handleAppLanguageChanged);
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
     _preserveUnconfiguredChild =
         widget.unconfiguredChildEnabled && !_runtimeManager.runtimeConfigured;
@@ -118,10 +128,16 @@ class _OperitThemeState extends State<OperitTheme> {
   void dispose() {
     _stopRuntimeStartupStatusPolling();
     _runtimeManager.removeListener(_handleRuntimeBootstrapChanged);
+    UserPreferencesManager.appLanguage.removeListener(_handleAppLanguageChanged);
     _controller.dispose();
     _assetDiagnostics.dispose();
     _cancelPreferenceSubscriptions();
     super.dispose();
+  }
+
+  /// Refreshes retained application roots without replacing navigation state.
+  void _handleAppLanguageChanged() {
+    if (mounted) setState(() {});
   }
 
   void _syncAssetContext() {
@@ -169,6 +185,7 @@ class _OperitThemeState extends State<OperitTheme> {
     try {
       await startFuture;
       final zoom = await _zoomPreferences.load();
+      final appLanguage = await const UserPreferencesManager().loadAppLanguage();
       final enterSendsMessage = await const UserPreferencesManager()
           .loadEnterSendsMessage();
       final chatScrollNavigatorOnLeft = await const UserPreferencesManager()
@@ -179,6 +196,13 @@ class _OperitThemeState extends State<OperitTheme> {
         return;
       }
       UserPreferencesManager.enterSendsMessage.value = enterSendsMessage;
+      UserPreferencesManager.appLanguage.value = appLanguage;
+      _appLanguageSubscription = const UserPreferencesManager()
+          .appLanguageFlow()
+          .listen((language) {
+            if (!mounted || generation != _runtimeGeneration) return;
+            UserPreferencesManager.appLanguage.value = language;
+          });
       UserPreferencesManager.chatScrollNavigatorOnLeft.value =
           chatScrollNavigatorOnLeft;
       _chatScrollNavigatorOnLeftSubscription = const UserPreferencesManager()
@@ -237,6 +261,8 @@ class _OperitThemeState extends State<OperitTheme> {
 
   /// Detaches application-level preference caches from the active runtime.
   void _cancelPreferenceSubscriptions() {
+    unawaited(_appLanguageSubscription?.cancel());
+    _appLanguageSubscription = null;
     unawaited(_longPasteSubscription?.cancel());
     _longPasteSubscription = null;
     unawaited(_enterSendsMessageSubscription?.cancel());
@@ -374,6 +400,7 @@ class _OperitThemeState extends State<OperitTheme> {
                 fontFamilyFallback: _defaultFontFamilyFallback,
                 themeMode: themeMode,
                 localizationsDelegates: AppLocalizations.localizationsDelegates,
+                locale: UserPreferencesManager.appLanguage.value.locale,
                 supportedLocales: AppLocalizations.supportedLocales,
                 builder: (context, child) =>
                     AnnotatedRegion<SystemUiOverlayStyle>(
@@ -449,6 +476,7 @@ class _OperitMaterialApp extends StatelessWidget {
       fontFamily: _fontFamily(themePreferenceSnapshot),
       fontFamilyFallback: _fontFamilyFallback(themePreferenceSnapshot),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
+      locale: UserPreferencesManager.appLanguage.value.locale,
       supportedLocales: AppLocalizations.supportedLocales,
       themeMode: themeMode,
       themeAnimationDuration: OperitTheme.of(context).suppressThemeAnimation
@@ -897,6 +925,9 @@ class OperitThemeController {
     String? bubbleAiFontType,
     String? bubbleAiSystemFontName,
     String? bubbleAiCustomFontPath,
+    String? codeFontType,
+    String? codeFontSystemName,
+    String? codeFontPath,
   }) async {
     await _preferencesManager.saveThemeSettings(
       inputStyle: inputStyle,
@@ -975,6 +1006,9 @@ class OperitThemeController {
       bubbleAiFontType: bubbleAiFontType,
       bubbleAiSystemFontName: bubbleAiSystemFontName,
       bubbleAiCustomFontPath: bubbleAiCustomFontPath,
+      codeFontType: codeFontType,
+      codeFontSystemName: codeFontSystemName,
+      codeFontPath: codeFontPath,
     );
     await _reloadThemePreferenceSnapshot();
   }
@@ -1181,7 +1215,8 @@ class _OperitThemePreviewState extends State<OperitThemePreview> {
         (snapshot.bubbleUserUseCustomFont &&
             _usesFontAsset(snapshot.bubbleUserFontType)) ||
         (snapshot.bubbleAiUseCustomFont &&
-            _usesFontAsset(snapshot.bubbleAiFontType))) {
+            _usesFontAsset(snapshot.bubbleAiFontType)) ||
+        _usesFontAsset(snapshot.codeFontType)) {
       if (prepareFonts) {
         _preparation = _prepareCustomFonts(snapshot).then((families) {
           _loadedCustomFontFamilies.addAll(families);
@@ -1834,6 +1869,7 @@ List<String?> _themeFontReferences(ThemePreferenceSnapshot snapshot) =>
       if (snapshot.bubbleAiUseCustomFont &&
           _usesFontAsset(snapshot.bubbleAiFontType))
         snapshot.bubbleAiCustomFontPath,
+      if (_usesFontAsset(snapshot.codeFontType)) snapshot.codeFontPath,
     ];
 
 String _customFontFamilyForPath(String path) {
@@ -1842,6 +1878,15 @@ String _customFontFamilyForPath(String path) {
     throw StateError('Theme font has not completed byte preparation: $path');
   }
   return family;
+}
+
+/// Resolves a persisted font asset reference to its registered family name,
+/// returning null when the reference is absent or not yet prepared.
+String? loadedCustomFontFamilyOrNull(String? reference) {
+  if (reference == null || reference.isEmpty) {
+    return null;
+  }
+  return _loadedCustomFontFamilies[reference];
 }
 
 /// Identifies persisted faces that must be registered before publishing a theme.
@@ -1902,6 +1947,7 @@ ColorScheme operitColorScheme(
       brightness,
     );
   }
+  final preset = themeColorPresetForSnapshot(themePreferenceSnapshot);
   final customPrimary =
       themePreferenceSnapshot.useCustomColors &&
           themePreferenceSnapshot.customPrimaryColor != null
@@ -1921,12 +1967,14 @@ ColorScheme operitColorScheme(
     brightness: brightness,
     dynamicSchemeVariant: _isGrayscaleThemeColor(seedColor)
         ? DynamicSchemeVariant.monochrome
-        : customPrimary == null
+        : preset != null || customPrimary == null
         ? DynamicSchemeVariant.tonalSpot
         : DynamicSchemeVariant.fidelity,
   );
 
-  if (customPrimary != null) {
+  // Built-in presets use the same complete M3 palette as the default theme.
+  // Their saved color pair identifies the preset; only its primary is a seed.
+  if (preset == null && customPrimary != null) {
     final foreground = _themeAccentForeground(customPrimary);
     scheme = scheme.copyWith(
       primary: customPrimary,
@@ -1936,7 +1984,7 @@ ColorScheme operitColorScheme(
       surfaceTint: customPrimary,
     );
   }
-  if (customSecondary != null) {
+  if (preset == null && customSecondary != null) {
     final secondaryScheme = ColorScheme.fromSeed(
       seedColor: customSecondary,
       brightness: brightness,
@@ -2001,10 +2049,6 @@ ColorScheme operitColorScheme(
 bool _isGrayscaleThemeColor(Color color) =>
     color.r == color.g && color.g == color.b;
 
-/// Chooses the black or white foreground with the higher WCAG contrast ratio.
-Color _themeAccentForeground(Color background) {
-  final luminance = background.computeLuminance();
-  final blackContrast = (luminance + 0.05) / 0.05;
-  final whiteContrast = 1.05 / (luminance + 0.05);
-  return blackContrast >= whiteContrast ? Colors.black : Colors.white;
-}
+/// Prefers white accent content and reserves black for very light backgrounds.
+Color _themeAccentForeground(Color background) =>
+    background.computeLuminance() >= 0.6 ? Colors.black : Colors.white;

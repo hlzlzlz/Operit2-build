@@ -2407,13 +2407,13 @@ abstract class AppLocalizations {
   /// No description provided for @settingsCategoryGlobalBehaviorSubtitle.
   ///
   /// In en, this message translates to:
-  /// **'Chat layout, input processing and interaction'**
+  /// **'App language, chat layout and input'**
   String get settingsCategoryGlobalBehaviorSubtitle;
 
   /// No description provided for @settingsCategoryGlobalBehaviorDescription.
   ///
   /// In en, this message translates to:
-  /// **'Configure application-wide chat layout, input and interaction behavior.'**
+  /// **'Choose the app language and configure application-wide chat layout, input and interaction behavior.'**
   String get settingsCategoryGlobalBehaviorDescription;
 
   /// No description provided for @settingsCategoryAppearanceTitle.
@@ -6098,6 +6098,60 @@ abstract class AppLocalizations {
   /// **'Mono'**
   String get settingsAppearanceFontMonospace;
 
+  /// No description provided for @settingsAppearanceNormalFontSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Body font'**
+  String get settingsAppearanceNormalFontSection;
+
+  /// No description provided for @settingsAppearanceFontsSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Fonts'**
+  String get settingsAppearanceFontsSection;
+
+  /// No description provided for @settingsAppearanceCodeFontSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Code font'**
+  String get settingsAppearanceCodeFontSection;
+
+  /// No description provided for @settingsAppearanceCodeFontDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Used by code blocks, inline code, diffs, file previews and the terminal'**
+  String get settingsAppearanceCodeFontDescription;
+
+  /// No description provided for @settingsAppearanceCodeFontBuiltin.
+  ///
+  /// In en, this message translates to:
+  /// **'Built-in mono'**
+  String get settingsAppearanceCodeFontBuiltin;
+
+  /// No description provided for @settingsAppearanceChatBodyFontSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat text font'**
+  String get settingsAppearanceChatBodyFontSection;
+
+  /// No description provided for @settingsAppearanceChatBodyFontFollow.
+  ///
+  /// In en, this message translates to:
+  /// **'Follows the body font'**
+  String get settingsAppearanceChatBodyFontFollow;
+
+  /// No description provided for @settingsAppearanceChatBodySplitSides.
+  ///
+  /// In en, this message translates to:
+  /// **'Set user and AI separately'**
+  String get settingsAppearanceChatBodySplitSides;
+
+  /// No description provided for @settingsAppearanceChatBodyAdjust.
+  ///
+  /// In en, this message translates to:
+  /// **'Adjust'**
+  String get settingsAppearanceChatBodyAdjust;
+
   /// No description provided for @settingsAppearanceInterfaceScale.
   ///
   /// In en, this message translates to:
@@ -6608,23 +6662,29 @@ abstract class AppLocalizations {
   /// **'Reset theme settings'**
   String get settingsAppearanceResetTheme;
 
-  /// No description provided for @settingsAppearanceLanguageSection.
+  /// No description provided for @settingsAppLanguageTitle.
   ///
   /// In en, this message translates to:
-  /// **'Language'**
-  String get settingsAppearanceLanguageSection;
+  /// **'App language'**
+  String get settingsAppLanguageTitle;
 
-  /// No description provided for @settingsAppearanceLanguage.
+  /// No description provided for @settingsAppLanguageSystem.
   ///
   /// In en, this message translates to:
-  /// **'Current language'**
-  String get settingsAppearanceLanguage;
+  /// **'Follow system'**
+  String get settingsAppLanguageSystem;
 
-  /// No description provided for @settingsAppearanceLanguageDescription.
+  /// No description provided for @settingsAppLanguageDescription.
   ///
   /// In en, this message translates to:
-  /// **'Language follows the localization configuration loaded at app startup.'**
-  String get settingsAppearanceLanguageDescription;
+  /// **'Changes apply immediately. No restart required.'**
+  String get settingsAppLanguageDescription;
+
+  /// No description provided for @settingsAppLanguageSaveError.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not save app language: {error}'**
+  String settingsAppLanguageSaveError(String error);
 
   /// No description provided for @settingsAppearanceBubblesTab.
   ///
@@ -10393,6 +10453,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Invalid request parameters'**
   String get apiErrorInvalidParametersTitle;
+
+  /// No description provided for @apiErrorReasoningContentTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a provider that supports reasoning replay'**
+  String get apiErrorReasoningContentTitle;
+
+  /// No description provided for @apiErrorReasoningContentMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'The request involves reasoning_content. In model settings, select a provider type that supports sending reasoning content back, such as DeepSeek or OpenAI Compatible, and make sure it matches your API endpoint.'**
+  String get apiErrorReasoningContentMessage;
 
   /// No description provided for @apiErrorInvalidParametersMessage.
   ///

@@ -1274,11 +1274,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsCategoryGlobalBehaviorSubtitle =>
-      'Chat layout, input processing and interaction';
+      'App language, chat layout and input';
 
   @override
   String get settingsCategoryGlobalBehaviorDescription =>
-      'Configure application-wide chat layout, input and interaction behavior.';
+      'Choose the app language and configure application-wide chat layout, input and interaction behavior.';
 
   @override
   String get settingsCategoryAppearanceTitle => 'Appearance & Interaction';
@@ -3389,6 +3389,35 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceFontMonospace => 'Mono';
 
   @override
+  String get settingsAppearanceNormalFontSection => 'Body font';
+
+  @override
+  String get settingsAppearanceFontsSection => 'Fonts';
+
+  @override
+  String get settingsAppearanceCodeFontSection => 'Code font';
+
+  @override
+  String get settingsAppearanceCodeFontDescription =>
+      'Used by code blocks, inline code, diffs, file previews and the terminal';
+
+  @override
+  String get settingsAppearanceCodeFontBuiltin => 'Built-in mono';
+
+  @override
+  String get settingsAppearanceChatBodyFontSection => 'Chat text font';
+
+  @override
+  String get settingsAppearanceChatBodyFontFollow => 'Follows the body font';
+
+  @override
+  String get settingsAppearanceChatBodySplitSides =>
+      'Set user and AI separately';
+
+  @override
+  String get settingsAppearanceChatBodyAdjust => 'Adjust';
+
+  @override
   String get settingsAppearanceInterfaceScale => 'Interface scale';
 
   @override
@@ -3654,14 +3683,19 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceResetTheme => 'Reset theme settings';
 
   @override
-  String get settingsAppearanceLanguageSection => 'Language';
+  String get settingsAppLanguageTitle => 'App language';
 
   @override
-  String get settingsAppearanceLanguage => 'Current language';
+  String get settingsAppLanguageSystem => 'Follow system';
 
   @override
-  String get settingsAppearanceLanguageDescription =>
-      'Language follows the localization configuration loaded at app startup.';
+  String get settingsAppLanguageDescription =>
+      'Changes apply immediately. No restart required.';
+
+  @override
+  String settingsAppLanguageSaveError(String error) {
+    return 'Could not save app language: $error';
+  }
 
   @override
   String get settingsAppearanceBubblesTab => 'Messages & Bubbles';
@@ -5920,6 +5954,14 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get apiErrorInvalidParametersTitle => 'Invalid request parameters';
+
+  @override
+  String get apiErrorReasoningContentTitle =>
+      'Use a provider that supports reasoning replay';
+
+  @override
+  String get apiErrorReasoningContentMessage =>
+      'The request involves reasoning_content. In model settings, select a provider type that supports sending reasoning content back, such as DeepSeek or OpenAI Compatible, and make sure it matches your API endpoint.';
 
   @override
   String get apiErrorInvalidParametersMessage =>
