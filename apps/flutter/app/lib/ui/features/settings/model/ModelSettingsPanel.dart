@@ -1421,6 +1421,13 @@ class _TransformerScopeSlider extends StatelessWidget {
   }
 }
 
+String _formatCatalogTime(int updatedAt) {
+  final time = DateTime.fromMillisecondsSinceEpoch(updatedAt).toLocal();
+  String twoDigits(int value) => value.toString().padLeft(2, '0');
+  return '${twoDigits(time.month)}-${twoDigits(time.day)} '
+      '${twoDigits(time.hour)}:${twoDigits(time.minute)}';
+}
+
 class _CatalogStatusLine extends StatelessWidget {
   const _CatalogStatusLine({
     required this.status,
@@ -1510,7 +1517,7 @@ class _AvailableModelItemCard extends StatelessWidget {
     final colorScheme = theme.colorScheme;
     final textTheme = theme.textTheme;
     final l10n = AppLocalizations.of(context)!;
-    final contextLength = model.context?.maxContextLength;
+    final contextLength = model.context?.maxContextTokens;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
