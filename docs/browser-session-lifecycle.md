@@ -2,6 +2,8 @@
 
 浏览器执行属于运行时宿主，会话是否存在不由工作区是否打开决定。通用浏览器使用现有会话协议；Android 的 `visit_web` 由进程级原生 Host 执行，工作区通过平台能力接口直接展示同一个 WebView。其他宿主继续使用运行时浏览器会话。
 
+浏览器首次打开及新建标签页时，未指定 URL 或 URL 为空白字符串会打开空白页 `about:blank`。工作区展示层与运行时宿主使用相同的默认主页。
+
 ## 请求链路
 
 ```text
@@ -61,6 +63,8 @@ Flutter 的 `PlatformWebVisitHost` 只提供观察、显式访问、用户控制
 工作区观察任务状态并提供手动提取、取消等操作，不拥有定时器、加载过程或工具返回的 Completer。工作区销毁不会取消任务；用户明确关闭访问标签才取消该请求。正常完成、失败和取消都会关闭临时会话。创建请求迟到时也会关闭已经失去任务所有者的会话。
 
 `visit_web` 总执行期限为 45 秒，单次脚本和清理分别最多 10 秒，为 Rust 宿主现有的 60 秒请求期限留出返回时间。脚本等待同时观察任务完成，取消时释放本地超时；事件订阅取消和会话关闭同时发起，避免互相等待。`browser_wait_for` 的文本条件由宿主进行限时轮询，不依赖页面内定时器或原生 WebView 对 Promise 返回值的处理。
+
+`browser_run_code` 在当前页面以异步 JavaScript 函数体执行代码，使用 `return` 返回结果，支持 `await`；结果必须可转换为 JSON。普通浏览器会话的 evaluate 接口仍执行原始脚本并保留表达式结果。浏览器 WebView 和原生 Chromium 宿主使用同一函数体约定。
 
 ## 外部应用跳转
 
@@ -123,6 +127,14 @@ fvm flutter test test/core/browser/workspace_browser_page_download_test.dart tes
 覆盖无后缀 URL、Content-Disposition 文件名、未知长度、HTTP 失败、传输截断、取消后重试的迟到回调、同名文件、工作区导出、宿主重启、状态与控制协议、320 像素窄屏和放大文字下的菜单布局。Android 插件的 `android_navigation_delegate_test.dart` 同时检查下载标记、请求上下文与禁止重新导航的行为；Windows/Linux/Apple/鸿蒙的适配器测试检查原生事件、原始文件读取和取消路由。`node --test tools/tests/browser_download_bridge.test.mjs` 直接运行生产注入脚本，验证 blob/data 二进制、分块、取消和立即撤销 object URL。
 
 ## 会话回归验证
+
+浏览器工具包统一使用 `dialog({ action, promptText? })`，SDK 对应 `Tools.Net.browserDialog`，Core 对应 `browser_dialog`。`action` 必填，仅支持 `get`、`accept`、`dismiss`。`get` 返回 `{ "dialog": null }` 或包含 `type`、`message`、`url`、`defaultValue` 的弹窗对象，不关闭弹窗；`accept` 确认，`dismiss` 取消。`promptText` 仅允许在接受 prompt 时传入，省略保留默认文本，空字符串提交空内容，取消返回 null。处理不存在的弹窗会报错。新版不再提供 `handle_dialog`、`accept` 布尔参数和预设下一次响应接口。
+
+`plugins/types-v1` 是冻结的历史契约，保持字节不变。API 1.0.0 / 1.0.1 的 `Tools.Net.browserHandleDialog({ accept, promptText? })` 和直接 `toolCall('browser_handle_dialog', ...)` 由 SDK v1 适配层转换为 `browser_dialog`，成功仍返回历史字符串 `OK`，Host 错误继续传播。v1 的取消动作忽略 promptText；新版使用严格参数检查。API 2.0.0 不暴露旧方法，也不重写旧工具名。
+
+工作区浏览器按会话保存待处理的 JavaScript 对话框。点击、执行脚本或导航触发对话框时，自动化操作提前返回 `dialog` 元数据，后续由 `dialog` 工具或用户界面处理。工具处理后立即清理状态并关闭对应界面，会话关闭时终止待处理请求。独立 Chromium Host 监听 `Page.javascriptDialogOpening` / `Page.javascriptDialogClosed`，触发弹窗的 CDP 命令会返回带弹窗信息的暂停错误，允许下一次工具调用查询和处理，避免等到命令超时。对话框协调测试在 `apps/flutter/app` 使用 `fvm flutter test test/core/browser/runtime_browser_dialogs_test.dart` 运行。原生 WebView 弹窗及首个导航触发弹窗仍需设备验证。
+
+Web iframe 的页面 JavaScript 执行受同源访问限制。原生 JavaScript 对话框要求同步返回，不能等待后续异步工具调用；平台接口通过 `supportsAsynchronousJavaScriptDialogs` 明确报告不支持，工作区不注册异步弹窗拦截，`dialog` 工具明确报错。工具没有预设下一次答案模式。异步处理支持由实际承载浏览器的 Host 决定；Web 客户端连接原生浏览器 Owner 时使用该 Owner 的能力。
 
 Flutter 测试覆盖并发创建的正序与逆序返回、排队创建及错误传播、未打开工作区的访问、延迟展示、展示异常、并发完成与取消、迟到创建、脚本无响应、嵌套休眠、视图实例保持和偏移后的触摸命中。它们验证共享生命周期和控制器契约；各平台真实 WebView 的渲染、输入和后台行为仍需设备验证。
 

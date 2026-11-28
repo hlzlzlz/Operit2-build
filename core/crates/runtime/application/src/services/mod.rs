@@ -15,6 +15,8 @@ pub mod GitHubOAuthBrokerService;
 pub mod LocalModelService;
 #[path = "LocalProviderService.rs"]
 pub mod LocalProviderService;
+#[path = "ProviderQuotaService.rs"]
+pub mod ProviderQuotaService;
 #[path = "ProviderRuntimeSupportService.rs"]
 pub mod ProviderRuntimeSupportService;
 #[path = "RuntimeBrowserService.rs"]
@@ -90,6 +92,8 @@ pub mod WorkActivityService;
 
 #[path = "LocalLlmService.rs"]
 pub(crate) mod LocalLlmService;
+#[path = "LocalGatewayService.rs"]
+pub(crate) mod LocalGatewayService;
 
 #[path = "ModelCatalogService.rs"]
 pub(crate) mod ModelCatalogService;

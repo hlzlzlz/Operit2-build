@@ -105,6 +105,7 @@ void main(List<String> args) async {
       '--source',
       'runtime',
       '--no-hot-reload',
+      '--flutter-assets',
     ], workingDirectory: repoRoot.path);
 
     if (shouldBuildWebAssets) {
@@ -549,6 +550,7 @@ const Set<String> _webRuntimeArtifactNames = <String>{
   'browser_http_stream.js',
   'terminal_9p.js',
   'operit_runtime_worker.js',
+  'runtime_storage_compaction.js',
   'operit_javascript_runtime.js',
   'operit_javascript_transport.js',
   'operit_javascript_worker.js',

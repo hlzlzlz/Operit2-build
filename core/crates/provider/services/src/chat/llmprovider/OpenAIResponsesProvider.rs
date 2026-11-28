@@ -11,17 +11,18 @@ use super::OpenAIProvider::OpenAIProvider;
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
 use super::ThinkingDialect::ThinkingDialect;
 use crate::chat::llmprovider::AIService::{
-    response_stream_from_chunks, AIService, AiServiceError, SendMessageRequest, TokenCounts,
+    response_stream_from_chunks, AIService, AiServiceError, ExtendedTokenCounts,
+    SendMessageRequest, TokenCounts, parse_extended_usage_counts,
 };
 use crate::runtime_support::ProviderRuntimeContext;
 use operit_model::ModelConfigData::{BuiltinToolRequestFormat, ModelBuiltinTool};
 use operit_model::PromptTurn::PromptTurn;
 use operit_model::ToolPrompt::ToolPrompt;
 use operit_util::stream::RevisableTextStream::{
-    with_event_channel_and_failure, RevisableTextStream, RevisableTextStreamLike,
+    with_ordered_event_channel_and_failure, RevisableTextStream, RevisableTextStreamLike,
     TerminalFailureState, TextStreamEventCarrier,
 };
-use operit_util::stream::Stream::{FnStream, Stream};
+use operit_util::stream::Stream::FnStream;
 use operit_util::ChatMarkupRegex::{attr_value, tag_body, tag_ranges};
 use operit_util::ChatUtils::ChatUtils;
 
@@ -42,6 +43,7 @@ pub struct OpenAIResponsesProvider {
     pub builtinTools: Vec<ModelBuiltinTool>,
     pub customHeaders: Vec<(String, String)>,
     runtimeContext: ProviderRuntimeContext,
+    gatewayBinding: Option<String>,
     state: Arc<Mutex<OpenAIResponsesProviderState>>,
 }
 
@@ -49,6 +51,8 @@ pub struct OpenAIResponsesProvider {
 struct OpenAIResponsesProviderState {
     inputTokenCount: i64,
     cachedInputTokenCount: i64,
+    cacheWriteInputTokenCount: i64,
+    reasoningTokenCount: i64,
     outputTokenCount: i64,
     cancelled: bool,
     activeParent: Option<OpenAIProvider>,
@@ -111,8 +115,15 @@ impl OpenAIResponsesProvider {
             enableToolCall,
             customHeaders,
             runtimeContext,
+            gatewayBinding: None,
             state: Arc::new(Mutex::new(OpenAIResponsesProviderState::default())),
         }
+    }
+
+    /// Binds Responses HTTP traffic to the device owning a local gateway.
+    pub fn with_gateway_binding(mut self, binding: String) -> Self {
+        self.gatewayBinding = Some(binding);
+        self
     }
 
     fn apply_usage_counts(&self, usage: &UsageCounts) {
@@ -120,6 +131,17 @@ impl OpenAIResponsesProvider {
             state.inputTokenCount = usage.actualInputTokens;
             state.cachedInputTokenCount = usage.cachedInputTokens;
             state.outputTokenCount = usage.outputTokens;
+        }
+    }
+
+    fn apply_extended_usage_counts(&self, extended: &ExtendedTokenCounts) {
+        if let Ok(mut state) = self.state.lock() {
+            if extended.cache_write_input > 0 {
+                state.cacheWriteInputTokenCount = extended.cache_write_input;
+            }
+            if extended.reasoning > 0 {
+                state.reasoningTokenCount = extended.reasoning;
+            }
         }
     }
 
@@ -136,6 +158,20 @@ impl OpenAIResponsesProvider {
                 input: state.inputTokenCount,
                 cached_input: state.cachedInputTokenCount,
                 output: state.outputTokenCount,
+            },
+        }
+    }
+
+    fn currentExtendedCounts(&self) -> ExtendedTokenCounts {
+        let state = self.state.lock().expect("OpenAIResponsesProvider state mutex poisoned");
+        match state.activeParent.as_ref() {
+            Some(parent) => ExtendedTokenCounts {
+                cache_write_input: parent.cache_write_input_token_count(),
+                reasoning: parent.reasoning_token_count(),
+            },
+            None => ExtendedTokenCounts {
+                cache_write_input: state.cacheWriteInputTokenCount,
+                reasoning: state.reasoningTokenCount,
             },
         }
     }
@@ -167,13 +203,22 @@ impl OpenAIResponsesProvider {
             state.inputTokenCount = usage.actualInputTokens;
             state.cachedInputTokenCount = usage.cachedInputTokens;
             state.outputTokenCount = usage.outputTokens;
+            if let Some((cw, r)) = state.activeParent.as_ref().map(|parent| {
+                (
+                    parent.cache_write_input_token_count(),
+                    parent.reasoning_token_count(),
+                )
+            }) {
+                state.cacheWriteInputTokenCount = cw;
+                state.reasoningTokenCount = r;
+            }
             state.activeParent = None;
         }
     }
 
     /// Creates the transport that owns both request token counting and live response usage.
     fn parentProvider(&self) -> OpenAIProvider {
-        OpenAIProvider::new_with_capabilities(
+        let mut parent = OpenAIProvider::new_with_capabilities(
             self.responsesApiEndpoint.clone(),
             self.key_getter.clone(),
             self.modelName.clone(),
@@ -185,7 +230,11 @@ impl OpenAIResponsesProvider {
             self.enableToolCall,
         )
 
-        .with_responses_api(true)
+        .with_responses_api(true);
+        if let Some(binding) = &self.gatewayBinding {
+            parent = parent.with_gateway_binding(binding.clone());
+        }
+        parent
     }
 
     /// Encodes a Responses payload with the same provider serializer used for transmission.
@@ -1250,8 +1299,20 @@ impl AIService for OpenAIResponsesProvider {
         self.currentTokenCounts().output
     }
 
+    fn cache_write_input_token_count(&self) -> i64 {
+        self.currentExtendedCounts().cache_write_input
+    }
+
+    fn reasoning_token_count(&self) -> i64 {
+        self.currentExtendedCounts().reasoning
+    }
+
     fn provider_model(&self) -> String {
-        format!("{}:{}", self.responsesProviderType, self.modelName)
+        let provider = match self.gatewayBinding {
+            Some(_) => "LOCAL_GATEWAY",
+            None => &self.responsesProviderType,
+        };
+        format!("{provider}:{}", self.modelName)
     }
 
     fn reset_token_counts(&mut self) {
@@ -1260,6 +1321,8 @@ impl AIService for OpenAIResponsesProvider {
             state.activeParent = None;
             state.inputTokenCount = 0;
             state.cachedInputTokenCount = 0;
+            state.cacheWriteInputTokenCount = 0;
+            state.reasoningTokenCount = 0;
             state.outputTokenCount = 0;
         }
     }
@@ -1342,7 +1405,7 @@ impl AIService for OpenAIResponsesProvider {
                     .expect("OpenAI Responses parent stream must only be collected once");
                 let producerTerminalFailure = producerTerminalFailure.clone();
                 Box::pin(async move {
-                    parentStream.collect(emit).await;
+                    parentStream.collect_ordered(emit).await;
                     if let Some(error) = parentStream.terminal_failure() {
                         producerTerminalFailure.set(error);
                     }
@@ -1355,7 +1418,7 @@ impl AIService for OpenAIResponsesProvider {
                     });
                 })
             });
-            return Ok(Box::new(with_event_channel_and_failure(
+            return Ok(Box::new(with_ordered_event_channel_and_failure(
                 cold_stream,
                 event_channel,
                 terminalFailure,
@@ -1363,6 +1426,7 @@ impl AIService for OpenAIResponsesProvider {
         }
 
         let response = super::ProviderHttp::post(&self.responsesApiEndpoint)
+            .gateway_binding(self.gatewayBinding.clone())
             .key_getter(self.key_getter.clone(), KeyAuthentication::Bearer)
             .headers(self.headers()?)
             .json(&requestBody)
@@ -1385,6 +1449,9 @@ impl AIService for OpenAIResponsesProvider {
         let parsed = OpenAIResponsesPayloadAdapter::parse_non_streaming_response(&jsonResponse);
         if let Some(usage) = parsed.usage {
             self.apply_usage_counts(&usage);
+        }
+        if let Some(usageValue) = jsonResponse.get("usage") {
+            self.apply_extended_usage_counts(&parse_extended_usage_counts(usageValue));
         }
 
         let mut chunks = Vec::new();

@@ -49,6 +49,17 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
             "",
             vec![
                 tool(
+                    "create_file",
+                    "Create a new file with full content. (write_file is preferred for all writing/creating operations)",
+                    "",
+                    vec![
+                        param("path", "string", "VFS file path", true, None),
+                        param("new", "string", "full file content for the new file", true, None)
+                    ],
+                    "",
+                    "",
+                ),
+                tool(
                     "get_terminal_info",
                     "Get terminal platform info and supported terminal types.",
                     "",
@@ -519,11 +530,11 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
                     "",
                 ),
                 tool(
-                    "browser_handle_dialog",
-                    "Accept or dismiss the currently open dialog.",
+                    "browser_dialog",
+                    "Inspect, accept, or dismiss the current alert, confirm, or prompt. get returns dialog: null when no dialog is open.",
                     "",
                     vec![
-                        param("accept", "boolean", "true to accept, false to dismiss", true, None),
+                        param("action", "string", "get, accept, or dismiss", true, None),
                         param("promptText", "string", "optional prompt text when handling a prompt dialog", false, None)
                     ],
                     "",
@@ -592,10 +603,10 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
                 ),
                 tool(
                     "browser_run_code",
-                    "Run a Playwright-style code snippet against the current tab.",
+                    "Run a JavaScript snippet as an async function body in the current tab; use return to produce a result and await asynchronous work.",
                     "",
                     vec![
-                        param("code", "string", "Playwright-style JavaScript snippet", true, None)
+                        param("code", "string", "JavaScript snippet executed as an async function body; return produces the result and await is supported", true, None)
                     ],
                     "",
                     "",
@@ -1288,6 +1299,17 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
             "",
             vec![
                 tool(
+                    "create_file",
+                    "创建并写入新文件。（推荐统一使用 write_file 处理写入与创建）",
+                    "",
+                    vec![
+                        param("path", "string", "VFS 文件路径", true, None),
+                        param("new", "string", "新文件的完整内容", true, None)
+                    ],
+                    "",
+                    "",
+                ),
+                tool(
                     "get_terminal_info",
                     "获取终端平台信息和支持的终端类型。",
                     "",
@@ -1758,11 +1780,11 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
                     "",
                 ),
                 tool(
-                    "browser_handle_dialog",
-                    "接受或取消当前打开的对话框。",
+                    "browser_dialog",
+                    "查看、接受或取消当前 alert、confirm 或 prompt。get 在没有弹窗时返回 dialog: null。",
                     "",
                     vec![
-                        param("accept", "boolean", "true 表示接受，false 表示取消", true, None),
+                        param("action", "string", "get 查看；accept 确认；dismiss 取消", true, None),
                         param("promptText", "string", "可选，处理 prompt 时输入的文本", false, None)
                     ],
                     "",
@@ -1831,10 +1853,10 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
                 ),
                 tool(
                     "browser_run_code",
-                    "运行 Playwright 风格的代码片段。",
+                    "在当前 tab 中以异步函数体形式运行 JavaScript 片段，用 return 返回结果，支持 await。",
                     "",
                     vec![
-                        param("code", "string", "Playwright 风格 JavaScript 代码片段", true, None)
+                        param("code", "string", "以异步函数体形式执行的 JavaScript 片段，用 return 返回结果，支持 await", true, None)
                     ],
                     "",
                     "",

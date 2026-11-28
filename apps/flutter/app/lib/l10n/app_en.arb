@@ -467,6 +467,9 @@
   },
   "chatSpeechInputConfigurationRequired": "Select a speech recognition configuration in Settings > Models & AI before using speech input.",
   "chatSpeechNoTextRecognized": "No speech recognized.",
+  "chatVoiceListening": "Listening…",
+  "chatVoiceStopListening": "Stop listening",
+  "chatVoiceThinking": "thinking",
   "history": "History",
   "bookmarks": "Bookmarks",
   "downloads": "Downloads",
@@ -484,6 +487,7 @@
   "searchHistory": "Search history",
   "noDownloadTasks": "No download tasks yet",
   "openFile": "Open file",
+  "openInOtherApp": "Open in other app",
   "workspaceFileOpening": "Opening file…",
   "workspaceFileOpenTimedOut": "Opening the file timed out. Please try again.",
   "openLocation": "Open location",
@@ -845,6 +849,8 @@
   "settingsModelProviderTypeOllama": "Ollama",
   "settingsModelProviderTypeOpenaiLocal": "OpenAI Local",
   "settingsModelProviderTypeLocalModel": "Local model",
+  "settingsModelProviderTypeLocalGateway": "Local gateway",
+  "settingsModelLocalGatewayHint": "Create this provider on the device running Magpie, CC Switch, or another gateway. Local addresses refer to that device; other devices reach it through route. Supports /v1/chat/completions, /v1/responses, and /v1/messages. Keep the gateway device online and allow remote execution.",
   "localModelsLoadFailed": "Failed to load local model status: {error}",
   "@localModelsLoadFailed": {
     "placeholders": {
@@ -991,6 +997,54 @@
   "settingsModelEditProvider": "Edit provider",
   "settingsModelAddModel": "Add model",
   "settingsModelAddModelShort": "Add",
+  "settingsModelSyncModels": "Sync models",
+  "settingsModelSyncingModels": "Syncing...",
+  "settingsModelSyncModelsTooltip": "Fetch the latest provider models and remove obsolete non-custom ones",
+  "settingsModelCustomBadge": "Custom",
+  "settingsModelSyncUpToDate": "Model list is up to date ({total} total)",
+  "@settingsModelSyncUpToDate": {
+    "placeholders": {
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSummary": "Synced: +{added}, -{removed}, {keptCustom} custom kept",
+  "@settingsModelSyncSummary": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "keptCustom": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSwitchedBinding": "Synced (+{added}, -{removed}); removed binding switched to {target}",
+  "@settingsModelSyncSwitchedBinding": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelSyncMissingBinding": "Synced (-{removed}); bound model was removed and no models remain",
+  "@settingsModelSyncMissingBinding": {
+    "placeholders": {
+      "removed": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelAvailableFetchedOnly": "Fetched only",
   "settingsModelAvailableIncludeHistory": "Include history",
   "settingsModelAvailableSourceFetched": "Fetched",
@@ -1748,6 +1802,9 @@
   "settingsAppearanceMessageDensity": "Message spacing",
   "settingsAppearanceMessageDensityComfortable": "Comfortable",
   "settingsAppearanceMessageDensityCompact": "Compact",
+  "settingsAppearanceChatHorizontalPadding": "Chat content side padding",
+  "settingsAppearanceChatHorizontalPaddingEdge": "Edge to edge",
+  "settingsAppearanceChatHorizontalPaddingDetail": "Smaller values widen the transcript; bubble and composer insets are unaffected.",
   "settingsAppearanceWideLayout": "Use wider chat layout",
   "settingsAppearanceRoundedMessages": "Rounded message cards",
   "settingsAppearanceShowAvatars": "Show message avatars",
@@ -3879,5 +3936,204 @@
         "type": "int"
       }
     }
-  }
+  },
+  "settingsUsageTabAnalytics": "Token Usage & Speed",
+  "settingsUsageTabQuotas": "Balances & Quotas",
+  "settingsUsageDeviceScopeAll": "All Space devices",
+  "settingsUsageDeviceScopeLocal": "This device",
+  "settingsUsageExportJson": "Copy JSON report",
+  "settingsUsageExportCsv": "Copy CSV table",
+  "settingsUsageExportCopied": "Report copied to clipboard",
+  "settingsUsageResetScopeTitle": "Reset usage statistics",
+  "settingsUsageResetLocalOnly": "This device only",
+  "settingsUsageResetAllSpace": "All devices in Space",
+  "settingsUsageResetScopeWarning": "Local reset keeps synced records on other devices; Space-wide reset clears history across all connected devices.",
+  "settingsUsageKpiThroughput": "Avg generation speed",
+  "settingsUsageKpiTtftMedian": "Median TTFT: {ttft}",
+  "@settingsUsageKpiTtftMedian": {
+    "placeholders": {
+      "ttft": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsUsageKpiSpeedSamples": "{count} streamed",
+  "@settingsUsageKpiSpeedSamples": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsUsageKpiReasoning": "Reasoning",
+  "settingsUsageKpiCacheWrite": "Cache write",
+  "settingsUsageKpiSuccessRate": "{ok} ok · {err} fail/cancel",
+  "@settingsUsageKpiSuccessRate": {
+    "placeholders": {
+      "ok": {
+        "type": "int"
+      },
+      "err": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsUsageTimelineSpeedTitle": "Generation speed (tok/s)",
+  "settingsUsageTimelineSpeedDetail": "Streamed output {speed} tok/s · TTFT {ttft}",
+  "@settingsUsageTimelineSpeedDetail": {
+    "placeholders": {
+      "speed": {
+        "type": "String"
+      },
+      "ttft": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsUsageTimelineNoSpeedData": "No streamed requests ≥100ms in range",
+  "settingsUsageAttrModels": "Models",
+  "settingsUsageAttrSources": "Function & Source",
+  "settingsUsageAttrDevices": "Space Devices",
+  "settingsUsageAttrLogs": "Request Logs",
+  "settingsUsageColSpeed": "Speed",
+  "settingsUsageColTtft": "TTFT",
+  "settingsUsageColSpend": "Est. Cost",
+  "settingsUsageColShare": "Share",
+  "settingsUsageDeviceUnknown": "Local / Legacy Node",
+  "settingsUsageLogFilterRecent": "Recent",
+  "settingsUsageLogFilterTopTokens": "Peak Tokens",
+  "settingsUsageLogFilterIssues": "Failed / Cancelled",
+  "settingsUsageLogFilterReasoning": "Reasoning",
+  "settingsUsageStatusCompleted": "Completed",
+  "settingsUsageStatusCancelled": "Cancelled",
+  "settingsUsageStatusFailed": "Failed",
+  "settingsUsageRequestDetailTitle": "Request Telemetry",
+  "settingsUsageLatencyBreakdown": "Wait {wait} · Stream {stream}",
+  "@settingsUsageLatencyBreakdown": {
+    "placeholders": {
+      "wait": {
+        "type": "String"
+      },
+      "stream": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsQuotaProbeAll": "Refresh all",
+  "settingsQuotaProbeSingle": "Refresh",
+  "settingsQuotaProbeViaNode": "Query via Space node",
+  "settingsQuotaFilterAll": "All",
+  "settingsQuotaFilterBalance": "Balances",
+  "settingsQuotaFilterSubscription": "Plans",
+  "settingsQuotaFilterLocal": "Local",
+  "settingsQuotaFilterBudget": "Budgets & Console",
+  "settingsQuotaRemainingLabel": "Remaining",
+  "settingsQuotaCashLabel": "Cash",
+  "settingsQuotaGrantedLabel": "Granted",
+  "settingsQuotaUsedLabel": "Used",
+  "settingsQuotaDailyUsedLabel": "Today",
+  "settingsQuotaMonthlyUsedLabel": "Month",
+  "settingsQuotaKeyPoolCount": "{count} pool keys",
+  "@settingsQuotaKeyPoolCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsQuotaStatusOk": "Active",
+  "settingsQuotaStatusUnauthorized": "Unauthorized",
+  "settingsQuotaStatusError": "Error",
+  "settingsQuotaStatusStale": "Not queried",
+  "settingsQuotaStatusUnsupported": "No Public API",
+  "settingsQuotaProbedBy": "Queried by {device} · {time}",
+  "@settingsQuotaProbedBy": {
+    "placeholders": {
+      "device": {
+        "type": "String"
+      },
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsQuotaOpenConsole": "Console",
+  "settingsQuotaProtocolConfig": "Protocol",
+  "settingsQuotaSetBudget": "Budget Cap",
+  "settingsQuotaEditBudget": "Edit Budget",
+  "settingsQuotaBudgetProgress": "{spent} / {limit} this cycle",
+  "@settingsQuotaBudgetProgress": {
+    "placeholders": {
+      "spent": {
+        "type": "String"
+      },
+      "limit": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsQuotaBudgetExceeded": "Budget alert threshold reached",
+  "settingsQuotaDialogBudgetLimit": "Monthly spending cap",
+  "settingsQuotaDialogResetDay": "Cycle reset day (1-28)",
+  "settingsQuotaDialogAlertPct": "Alert threshold (%)",
+  "settingsQuotaDialogProtocolLabel": "Balance query protocol",
+  "settingsQuotaDialogCustomPath": "Custom URL / relative path",
+  "settingsQuotaDialogAmountJsonPath": "Amount JSON dot path",
+  "settingsQuotaDialogCurrencyJsonPath": "Currency JSON dot path (optional)",
+  "settingsQuotaDialogClear": "Remove",
+  "settingsQuotaEmptyProviders": "No model providers configured yet",
+  "settingsQuotaLocalZeroCost": "On-device inference · Zero API fee",
+  "settingsUsageColStatus": "Status",
+  "settingsUsageColTime": "Time",
+  "settingsUsageModeStream": "Stream",
+  "settingsUsageModeNonStream": "Standard",
+  "settingsUsageTopModelsTitle": "Model Distribution & Token Mix",
+  "settingsUsageTokenMixLabel": "Token composition",
+  "settingsUsageDirectInputLabel": "Direct input",
+  "settingsUsageNoModelsInRange": "No model traffic in this window",
+  "settingsUsageKpiNoPriceHint": "No model pricing matched",
+  "settingsUsageKpiStreamHint": "Needs streamed reply ≥100ms",
+  "settingsUsageHeatmapWeeks": "{weeks}-week activity",
+  "@settingsUsageHeatmapWeeks": {
+    "placeholders": {
+      "weeks": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsQuotaSummaryTotalRemaining": "Tracked Balance",
+  "settingsQuotaSummaryProviders": "{ready} active · {total} configured",
+  "@settingsQuotaSummaryProviders": {
+    "placeholders": {
+      "ready": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsQuotaSummaryAlertCount": "{count} alerts",
+  "@settingsQuotaSummaryAlertCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsUsageHeatmapSubtitle": "Daily usage over the last {weeks} weeks",
+  "@settingsUsageHeatmapSubtitle": {
+    "placeholders": {
+      "weeks": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsUsageHeatmapMetricTokens": "Token",
+  "settingsUsageHeatmapMetricRequests": "Requests",
+  "settingsUsageHeatmapMetricCost": "Cost",
+  "settingsUsageWeekdayMon": "Mon",
+  "settingsUsageWeekdayWed": "Wed",
+  "settingsUsageWeekdayFri": "Fri",
+  "settingsUsageWeekdaySun": "Sun"
 }

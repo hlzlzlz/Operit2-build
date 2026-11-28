@@ -44,7 +44,7 @@ const PACKAGE_SYSTEM_GUIDELINES_EN: &str = r#"PACKAGE SYSTEM
   </tool>
 - This will show you all the tools in the package and how to use them
 - Only after activating a package, you can use its tools directly
-- Package calls return execution_id and wait at most 20 seconds. Running work continues in the background. Call package_wait to collect subsequent output and completion; do not repeat the original operation to wait for it.
+- Package calls wait at most 20 seconds and return completed business results directly. Running work returns execution_id and continues in the background. Call package_wait to collect subsequent output and completion; has_more_output or a nonzero pending_execution_count requires further reads. Do not repeat the original operation to wait for it.
 - Operations in one response execute in order through actual completion, including after foreground expiry. Different response batches can overlap; package_wait reads progress independently of their operation queues."#;
 
 const PACKAGE_SYSTEM_GUIDELINES_CN: &str = r#"包系统：
@@ -55,7 +55,7 @@ const PACKAGE_SYSTEM_GUIDELINES_CN: &str = r#"包系统：
   </tool>
 - 这将显示包中的所有工具及其使用方法
 - 只有在激活包后，才能直接使用其工具
-- 包调用返回 execution_id，默认最多等待20秒。到时任务继续运行，使用 package_wait 收取后续输出与完成结果，不要重复执行原操作来等待。
+- 包调用默认最多等待20秒，完成时直接返回业务结果。仍在运行时返回 execution_id，任务继续执行；使用 package_wait 收取后续输出与完成结果，has_more_output 或非零 pending_execution_count 表示仍需继续领取。不要重复执行原操作来等待。
 - 同一次响应中的操作按实际完成顺序串行执行，前台超时不会放行后续操作；不同响应批次可以并行，package_wait 独立读取进度。"#;
 
 const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_EN: &str = r#"PACKAGE SYSTEM
@@ -66,7 +66,7 @@ const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_EN: &str = r#"PACKAGE SYSTEM
   - Set tool_name to the actual package tool name (e.g. packageName:toolName)
   - Put target tool arguments in params as a JSON object
   - Optional top-level timeout_ms controls foreground waiting from 0 to 20000 milliseconds (default 20000); it is separate from the package's arguments
-- Every package execution returns execution_id. A running result means work continues; use package_wait with that ID, or omit the ID to collect previous executions in this chat. Do not re-run an operation just to wait for its result.
+- Completed package calls return business results directly. Running work returns execution_id; use package_wait with that ID, or omit the ID to collect previous executions in this chat. has_more_output or a nonzero pending_execution_count means more reads are needed. Do not re-run an operation just to wait for its result.
 - Operations in one response execute in order through actual completion, including after foreground expiry. Different response batches can overlap; package_wait reads progress independently of their operation queues."#;
 
 const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN: &str = r#"包系统：
@@ -77,7 +77,7 @@ const PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN: &str = r#"包系统：
   - tool_name 填写真实工具名（例如 packageName:toolName）
   - 将目标工具参数放入 params（JSON对象）
   - 顶层 timeout_ms 控制前台等待，0至20000毫秒，默认20000，与包内参数独立
-- 每次包执行返回 execution_id。running 表示后台仍在执行；用 package_wait 和该 ID 收取后续输出与结果，省略 ID 可收取当前对话前面的执行。不要重复原操作来等待结果。
+- 包调用完成时直接返回业务结果。running 表示后台仍在执行，并返回 execution_id；用 package_wait 和该 ID 收取后续输出与结果，省略 ID 可收取当前对话前面的执行。has_more_output 或非零 pending_execution_count 表示仍需继续领取。不要重复原操作来等待结果。
 - 同一次响应中的操作按实际完成顺序串行执行，前台超时不会放行后续操作；不同响应批次可以并行，package_wait 独立读取进度。"#;
 
 pub const SYSTEM_PROMPT_TEMPLATE: &str = r#"BEGIN_SELF_INTRODUCTION_SECTION
@@ -157,7 +157,6 @@ pub struct SystemPromptOptions {
     pub terminal_path_mappings: Vec<TerminalPathMapping>,
     pub saf_bookmark_names: Vec<String>,
     pub use_english: bool,
-    pub custom_system_prompt_template: String,
     pub enable_tools: bool,
     pub has_image_recognition: bool,
     pub chat_model_has_direct_image: bool,
@@ -189,7 +188,6 @@ impl Default for SystemPromptOptions {
             terminal_path_mappings: Vec::new(),
             saf_bookmark_names: Vec::new(),
             use_english: false,
-            custom_system_prompt_template: String::new(),
             enable_tools: true,
             has_image_recognition: false,
             chat_model_has_direct_image: false,
@@ -267,12 +265,10 @@ impl SystemPromptConfig {
             packages_section.push_str("<tool name=\"use_package\"><param name=\"package_name\">package_name_here</param></tool>\n");
         }
 
-        let template_to_use = if !options.custom_system_prompt_template.is_empty() {
-            options.custom_system_prompt_template.clone()
-        } else if options.use_english {
-            SYSTEM_PROMPT_TEMPLATE.to_string()
+        let template_to_use = if options.use_english {
+            SYSTEM_PROMPT_TEMPLATE
         } else {
-            SYSTEM_PROMPT_TEMPLATE_CN.to_string()
+            SYSTEM_PROMPT_TEMPLATE_CN
         };
 
         let workspace_guidelines = getWorkspaceGuidelines(
@@ -391,17 +387,6 @@ impl SystemPromptConfig {
                 .replace("AVAILABLE_TOOLS_SECTION", "")
                 .replace(&workspace_guidelines, "");
         }
-
-        // Custom templates may omit the placeholder, but workspace context is
-        // still required to use tools correctly.
-        if options.enable_tools
-            && !workspace_guidelines.is_empty()
-            && !template_to_use.contains("WORKSPACE_GUIDELINES_SECTION")
-        {
-            prompt.push_str("\n\n");
-            prompt.push_str(&workspace_guidelines);
-        }
-
         if options.enable_tools {
             prompt.push_str("\n\n");
             prompt.push_str(getAttachmentGuidelines(options.use_english));
@@ -413,7 +398,7 @@ impl SystemPromptConfig {
     }
 
     #[allow(non_snake_case)]
-    /// Propagates tool-policy failure through custom system-prompt construction.
+    /// Composes character instructions and plugin sections into the built-in system prompt.
     pub async fn getSystemPromptWithCustomPrompts(
         options: SystemPromptWithCustomOptions,
     ) -> Result<String, String> {
@@ -444,10 +429,6 @@ impl SystemPromptConfig {
             (
                 "safBookmarkNames".to_string(),
                 json!(options.base.saf_bookmark_names),
-            ),
-            (
-                "customSystemPromptTemplate".to_string(),
-                json!(options.base.custom_system_prompt_template),
             ),
             (
                 "customIntroPrompt".to_string(),
@@ -565,9 +546,9 @@ fn buildWorkspaceRuleFileSection(
 #[allow(non_snake_case)]
 fn getAttachmentGuidelines(use_english: bool) -> &'static str {
     if use_english {
-        "ATTACHMENTS:\n- Attachment `path` is relative to `.`. File tools and terminal sessions use this same base. Read supplied relative attachment paths directly, including `..`; use embedded content directly.\n- Small attachments contain the file; large attachments use `.operit-ref.json` with the source `node_id` and VFS path.\n- Check the current node first. For a missing file, use `list_core_nodes` and access its source with file tools. For terminal access, use `switch_core` and the source Host's resolved path.\n- If the path is missing, use embedded content or request re-upload. For terminal startup errors, report the error and use file tools."
+        "ATTACHMENTS:\n- Attachment `path` is relative to `.`. File tools and terminal sessions use this same base. Read supplied relative attachment paths directly, including `..`; use embedded content directly.\n- Small attachments contain the file; large attachments use `.operit-ref.json` with the source `node_id` and VFS path.\n- Check the current node first. `source_path` is the exact node-qualified VFS address: pass it unchanged to `read_file` to read the source device, including images. File tools route across devices without `switch_core`; a different `node_id` alone does not mean the attachment is inaccessible. Use `list_core_nodes` to inspect source reachability. For terminal execution on that device, use `switch_core` and the source Host's resolved path.\n- Request re-upload only after an actual read fails and the source is unavailable. For terminal startup errors, report the error and use file tools."
     } else {
-        "附件：\n- 附件 `path` 相对于 `.`，文件工具与终端使用同一个基准。直接读取附件提供的相对路径，支持 `..`；内嵌内容直接使用。\n- 小附件保存文件本体；大附件通过 `.operit-ref.json` 记录来源 `node_id` 和 VFS 路径。\n- 先读取当前节点；文件缺失时，通过 `list_core_nodes` 检查来源并用文件工具读取。终端访问来源文件时，使用 `switch_core` 和来源 Host 解析的路径。\n- 路径缺失时使用内嵌内容或请求重新上传；终端启动失败时报告错误并使用文件工具。"
+        "附件：\n- 附件 `path` 相对于 `.`，文件工具与终端使用同一个基准。直接读取附件提供的相对路径，支持 `..`；内嵌内容直接使用。\n- 小附件保存文件本体；大附件通过 `.operit-ref.json` 记录来源 `node_id` 和 VFS 路径。\n- 先读取当前节点；`source_path` 是准确的节点限定 VFS 地址，将它原样传给 `read_file` 即可读取来源设备，图片也适用。文件工具跨设备读取不需要 `switch_core`，不能仅凭 `node_id` 不同就判断附件不可读。通过 `list_core_nodes` 检查来源可达性。需要在来源设备执行终端时，再使用 `switch_core` 和来源 Host 解析的路径。\n- 实际读取失败且来源不可用后才请求重新上传；终端启动失败时报告错误并使用文件工具。"
     }
 }
 
@@ -717,6 +698,33 @@ mod tests {
         }
     }
 
+    /// Keeps the selected character in built-in prompts across languages and tool protocols.
+    #[tokio::test(flavor = "current_thread")]
+    async fn builtInPromptsIncludeCharacterInstructions() {
+        let intro = "You are the selected character. Reply in this character's voice.";
+        for use_english in [false, true] {
+            for (use_tool_call_api, tool_exposure_mode) in [
+                (false, super::ToolExposureMode::FULL),
+                (true, super::ToolExposureMode::FULL),
+                (false, super::ToolExposureMode::CLI),
+            ] {
+                let prompt = SystemPromptConfig::getSystemPromptWithCustomPrompts(
+                    super::SystemPromptWithCustomOptions {
+                        base: SystemPromptOptions {
+                            use_english,
+                            use_tool_call_api,
+                            tool_exposure_mode,
+                            ..SystemPromptOptions::default()
+                        },
+                        custom_intro_prompt: intro.into(),
+                    },
+                ).await.expect("Character prompt composition must succeed");
+                assert_eq!(prompt.matches(intro).count(), 1);
+                assert!(!prompt.contains("BEGIN_SELF_INTRODUCTION_SECTION"));
+            }
+        }
+    }
+
     /// Verifies native tool-call prompts never advertise the text XML protocol.
     #[tokio::test(flavor = "current_thread")]
     async fn nativeToolCallPromptExcludesXmlToolSyntax() {
@@ -752,11 +760,12 @@ mod tests {
         for use_english in [true, false] {
             let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
                 use_english,
-                custom_system_prompt_template: "Custom instructions".into(),
                 ..SystemPromptOptions::default()
             })
             .await.expect("Tool-prompt policies must succeed in this test");
             assert!(prompt.contains("node_id"));
+            assert!(prompt.contains("source_path"));
+            assert!(prompt.contains("read_file"));
             assert!(prompt.contains("switch_core"));
             assert!(prompt.contains(".operit/sync.json"));
             assert!(prompt.contains(".operit-ref.json"));
@@ -791,7 +800,7 @@ mod tests {
         }
     }
 
-    /// Workspaces, unbound output areas and custom templates all carry executable policy guidance.
+    /// Workspaces and unbound output areas carry executable policy guidance.
     #[tokio::test(flavor = "current_thread")]
     async fn sync_policy_instructions_cover_schema_and_proactive_exclusion_in_both_languages() {
         let defaults = serde_json::to_string_pretty(&operit_store::FileSyncPolicy::FileSyncPolicy::default()).unwrap();
@@ -801,7 +810,6 @@ mod tests {
                     use_english,
                     workspace_path: workspace,
                     output_path: Some("/operitapp/outputs/family".into()),
-                    custom_system_prompt_template: "Custom instructions".into(),
                     ..SystemPromptOptions::default()
                 }).await.unwrap();
                 assert!(prompt.contains(&format!("```json\n{defaults}\n```")));
@@ -874,6 +882,8 @@ mod tests {
                     options.use_tool_call_api = use_tool_call_api;
                     let prompt = SystemPromptConfig::getSystemPrompt(options).await.expect("Tool-prompt policies must succeed in this test");
                     assert!(prompt.contains("`native/shell`: `.`"));
+                    assert_eq!(prompt.matches("`native/shell`: `.`").count(), 1);
+                    assert!(!prompt.contains("WORKSPACE_GUIDELINES_SECTION"));
                     assert!(prompt.contains("/Users/test/My Projects/library"));
                     assert!(prompt.contains(if use_english {
                         "Each selected Host starts its sessions at `.`"
@@ -885,32 +895,14 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn workspacePromptSurvivesCustomTemplatesWithOrWithoutPlaceholder() {
-        for template in [
-            "Custom instructions.",
-            "Custom instructions.\nWORKSPACE_GUIDELINES_SECTION",
-        ] {
-            let mut options = workspacePromptOptions(true);
-            options.custom_system_prompt_template = template.into();
-            let prompt = SystemPromptConfig::getSystemPrompt(options).await.expect("Tool-prompt policies must succeed in this test");
-            assert!(prompt.contains("Custom instructions."));
-            assert!(prompt.contains("`native/shell`: `.`"));
-            assert_eq!(prompt.matches("TERMINAL WORKSPACE PATHS").count(), 1);
-            assert!(!prompt.contains("WORKSPACE_GUIDELINES_SECTION"));
-        }
-    }
-
+    /// Omits terminal paths when tools are disabled or no workspace is bound.
     #[tokio::test(flavor = "current_thread")]
     async fn workspacePromptOmitsPathsWhenToolsAreDisabledOrWorkspaceIsUnbound() {
-        for template in ["Custom instructions.", "WORKSPACE_GUIDELINES_SECTION"] {
-            let mut options = workspacePromptOptions(true);
-            options.custom_system_prompt_template = template.into();
-            options.enable_tools = false;
-            assert!(!SystemPromptConfig::getSystemPrompt(options)
-                .await.expect("Tool-prompt policies must succeed in this test")
-                .contains("/Users/test/My Projects"));
-        }
+        let mut options = workspacePromptOptions(true);
+        options.enable_tools = false;
+        assert!(!SystemPromptConfig::getSystemPrompt(options)
+            .await.expect("Tool-prompt policies must succeed in this test")
+            .contains("/Users/test/My Projects"));
         for path in [None, Some(" ".into())] {
             let mut options = workspacePromptOptions(true);
             options.workspace_path = path;
@@ -920,7 +912,7 @@ mod tests {
         }
     }
 
-    /// Every tool protocol and custom template must retain the relative-path contract.
+    /// Every tool protocol retains the relative-path contract in both languages.
     #[tokio::test(flavor = "current_thread")]
     async fn chat_file_prompt_uses_the_same_relative_base_without_attachment_searches() {
         for use_english in [false, true] {
@@ -930,36 +922,33 @@ mod tests {
                     (true, super::ToolExposureMode::FULL),
                     (false, super::ToolExposureMode::CLI),
                 ] {
-                    for template in ["", "Custom instructions"] {
-                        let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
-                            use_english,
-                            workspace_path: workspace_path.clone(),
-                            output_path: Some("/operitapp/outputs/family".into()),
-                            use_tool_call_api,
-                            tool_exposure_mode: tool_exposure_mode.clone(),
-                            custom_system_prompt_template: template.into(),
-                            ..SystemPromptOptions::default()
-                        }).await.expect("Tool-prompt policies must succeed in this test");
-                        assert!(prompt.contains(if use_english {
-                            "File tools and terminal sessions use this same base"
-                        } else {
-                            "文件工具与终端使用同一个基准"
-                        }));
-                        assert!(prompt.contains(if use_english {
-                            "Read supplied relative attachment paths directly"
-                        } else {
-                            "直接读取附件提供的相对路径"
-                        }));
-                        assert!(prompt.contains(if use_english {
-                            "For terminal startup errors"
-                        } else {
-                            "终端启动失败时报告错误"
-                        }));
-                        assert!(!prompt.contains("Relative file paths require a workspace"));
-                        assert!(!prompt.contains("Without a workspace, list `/`"));
-                        assert!(!prompt.contains("文件相对路径需要绑定工作区"));
-                        assert!(!prompt.contains("没有工作区时，可列出 `/`"));
-                    }
+                    let prompt = SystemPromptConfig::getSystemPrompt(SystemPromptOptions {
+                        use_english,
+                        workspace_path: workspace_path.clone(),
+                        output_path: Some("/operitapp/outputs/family".into()),
+                        use_tool_call_api,
+                        tool_exposure_mode: tool_exposure_mode.clone(),
+                        ..SystemPromptOptions::default()
+                    }).await.expect("Tool-prompt policies must succeed in this test");
+                    assert!(prompt.contains(if use_english {
+                        "File tools and terminal sessions use this same base"
+                    } else {
+                        "文件工具与终端使用同一个基准"
+                    }));
+                    assert!(prompt.contains(if use_english {
+                        "Read supplied relative attachment paths directly"
+                    } else {
+                        "直接读取附件提供的相对路径"
+                    }));
+                    assert!(prompt.contains(if use_english {
+                        "For terminal startup errors"
+                    } else {
+                        "终端启动失败时报告错误"
+                    }));
+                    assert!(!prompt.contains("Relative file paths require a workspace"));
+                    assert!(!prompt.contains("Without a workspace, list `/`"));
+                    assert!(!prompt.contains("文件相对路径需要绑定工作区"));
+                    assert!(!prompt.contains("没有工作区时，可列出 `/`"));
                 }
             }
         }

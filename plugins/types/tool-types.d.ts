@@ -31,7 +31,6 @@ export interface ToolResultMap {
   make_directory: FileOperationData;
   find_files: FindFilesResultData;
   grep_code: GrepResultData;
-  grep_context: GrepResultData;
   file_info: FileInfoData;
   zip_files: FileOperationData;
   unzip_files: FileOperationData;
@@ -53,7 +52,7 @@ export interface ToolResultMap {
   browser_evaluate: string;
   browser_file_upload: string;
   browser_fill_form: string;
-  browser_handle_dialog: string;
+  browser_dialog: string;
   browser_hover: string;
   browser_navigate: string;
   browser_navigate_back: string;

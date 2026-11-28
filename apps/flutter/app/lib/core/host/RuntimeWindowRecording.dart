@@ -12,6 +12,7 @@ class RuntimeWindowRecording {
   final _result = Completer<RecordedAudio?>();
   final int _maxDurationMs;
   final int? _silenceMs;
+  final void Function(Uint8List bytes)? _onChunk;
   late final Future<void> _started;
   Timer? _deadline;
   Future<void>? _ending;
@@ -22,6 +23,9 @@ class RuntimeWindowRecording {
       LocalSpeechRecorder.sampleRate * _frameMs ~/ 1000;
   static const _threshold = 360;
   static const _speechFrames = 8;
+  static const _preRollFrames = 12;
+  int _frames = 0;
+  int _skipSamples = 0;
   int? _lowByte;
   int _energy = 0;
   int _samples = 0;
@@ -30,16 +34,25 @@ class RuntimeWindowRecording {
   bool _heardSpeech = false;
   double _level = 0;
 
-  /// Starts capture on the owner engine and arms its deadline after authorization.
-  RuntimeWindowRecording(this._maxDurationMs, this._silenceMs) {
-    _started = _recorder.start(onChunk: _observe);
+  /// Starts capture on the owner engine and arms its deadline after
+  /// authorization. Every captured chunk also reaches [onChunk].
+  RuntimeWindowRecording(
+    this._maxDurationMs,
+    this._silenceMs, {
+    bool echoCancellation = false,
+    void Function(Uint8List bytes)? onChunk,
+  }) : _onChunk = onChunk {
+    _started = _recorder.start(
+      onChunk: _observe,
+      echoCancellation: echoCancellation,
+    );
     unawaited(
       _started.then<void>((_) {
         if (_ending != null) return;
         _deadline = Timer(Duration(milliseconds: _maxDurationMs), () {
           unawaited(finish(discard: _silenceMs != null && !_heardSpeech));
         });
-      }, onError: (Object _, StackTrace _) => finish()),
+      }, onError: (Object _, StackTrace stack) => finish()),
     );
   }
 
@@ -48,6 +61,8 @@ class RuntimeWindowRecording {
 
   /// Reports the smoothed microphone level from zero to one during capture.
   double get level => _ending == null ? _level : 0;
+
+  bool get hasSpeech => _heardSpeech && !_discard;
 
   /// Coalesces manual stop, silence, timeout and window teardown.
   Future<void> finish({bool discard = false}) {
@@ -62,7 +77,7 @@ class RuntimeWindowRecording {
     try {
       try {
         await _started;
-        if (!_discard) audio = await _recorder.stop();
+        if (!_discard) audio = await _recorder.stop(skipSamples: _skipSamples);
       } finally {
         await _recorder.dispose();
       }
@@ -75,6 +90,7 @@ class RuntimeWindowRecording {
   /// Meters the input and detects trailing silence using fixed PCM16 frames.
   void _observe(Uint8List bytes) {
     if (_ending != null) return;
+    _onChunk?.call(bytes);
     final silenceMs = _silenceMs;
     for (final byte in bytes) {
       final low = _lowByte;
@@ -93,13 +109,20 @@ class RuntimeWindowRecording {
       _level += (level - _level) * (level > _level ? 0.55 : 0.16);
       _energy = 0;
       _samples = 0;
-      if (silenceMs == null) continue;
+      _frames++;
       if (audible) {
         _quiet = 0;
-        if (++_loud >= _speechFrames) _heardSpeech = true;
+        if (!_heardSpeech && ++_loud >= _speechFrames) {
+          _heardSpeech = true;
+          _skipSamples =
+              math.max(0, _frames - _speechFrames - _preRollFrames) *
+              _samplesPerFrame;
+        }
       } else {
         _loud = 0;
-        if (_heardSpeech && ++_quiet * _frameMs >= silenceMs) {
+        if (silenceMs != null &&
+            _heardSpeech &&
+            ++_quiet * _frameMs >= silenceMs) {
           unawaited(finish());
           return;
         }

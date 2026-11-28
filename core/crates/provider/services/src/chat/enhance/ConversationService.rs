@@ -6,23 +6,29 @@ use serde_json::{json, Value};
 
 use crate::chat::config::FunctionalPrompts::FunctionalPrompts;
 use crate::chat::enhance::MultiServiceManager::MultiServiceManager;
+use crate::chat::enhance::ConversationContext::ConversationContext;
 use crate::chat::hooks::SummaryHookRegistry::{SummaryHookContext, SummaryHookRegistry};
 use crate::chat::llmprovider::ThinkingDialect::RequestThinking;
 use crate::chat::llmprovider::AIService::{
-    ensure_response_completed, AiServiceError, SendMessageRequest, TokenCounts,
+    collect_response_text_observed, AiServiceError, SendMessageRequest, TokenCounts,
 };
 use crate::runtime_support::ProviderRuntimeContext;
+use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_model::FunctionType::FunctionType;
 use operit_model::ModelParameter::ModelParameter;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
-use operit_store::repository::UsageStatisticsStore::{UsageRequestSource, UsageStatisticsStore};
+use operit_model::ProviderQuota::{
+    calculate_model_cost, pricing_currency_code, UsageRequestStatus,
+};
+use operit_store::repository::UsageStatisticsStore::{
+    UsageRequestCapture, UsageRequestSource, UsageStatisticsStore,
+};
 use operit_util::ChatMarkupRegex::{attr_value, ChatMarkupRegex};
 use operit_vfs::VfsPath;
 use operit_tools::ToolExecutionManager::ToolExecutionManager;
-use operit_util::stream::Stream::Stream;
 use crate::chat::llmprovider::MediaLinkParser::unescape_xml_attribute;
 
-const APPLY_FILE_TOOL_NAME: &str = "apply_file";
+const FILE_MUTATION_TOOL_NAMES: &[&str] = &["apply_file", "write_file", "edit_file", "create_file"];
 pub type SummaryProgressCallback = Arc<dyn Fn(&'static str) + Send + Sync>;
 
 /// Identifies the automatic threshold check that requested compaction.
@@ -73,7 +79,6 @@ pub struct PrepareConversationHistoryRequest {
     pub workspace_path: Option<String>,
     pub workspace_folders: Vec<String>,
     pub prompt_function_type: String,
-    pub custom_system_prompt_template: Option<String>,
     pub participant_id: Option<String>,
     pub proxy_sender_name: Option<String>,
     pub has_image_recognition: bool,
@@ -219,7 +224,13 @@ impl ConversationService {
             for (start, end) in ChatMarkupRegex::attachment_ranges(&turn.content).into_iter().rev() {
                 let Some(openEnd) = content[start..end].find('>') else { continue; };
                 let end = start + openEnd;
-                let rewritten = attributes.replace_all(&content[start..end], |capture: &regex::Captures<'_>| {
+                let opening = &content[start..end];
+                let source = attr_value(opening, "node_id").zip(attr_value(opening, "path"))
+                    .map(|(node, path)| (unescape_xml_attribute(&node), unescape_xml_attribute(&path)))
+                    .filter(|(node, path)| !node.trim().is_empty()
+                        && ["/app/", "/operitapp/", "/mnt/", "/virtual/"].iter().any(|root| path.starts_with(root)))
+                    .map(|(node, path)| operit_util::FileUtils::FileUtils::qualifyVfsPath(&node, &path));
+                let mut rewritten = attributes.replace_all(opening, |capture: &regex::Captures<'_>| {
                     let path = unescape_xml_attribute(capture.get(2).or_else(|| capture.get(3)).unwrap().as_str());
                     if !["/app/", "/operitapp/", "/mnt/", "/virtual/"].iter().any(|root| path.starts_with(root)) {
                         return capture[0].to_string();
@@ -229,6 +240,11 @@ impl ConversationService {
                         Err(_) => capture[0].to_string(),
                     }
                 }).into_owned();
+                if let Some(source) = source {
+                    let source = source.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "&#39;");
+                    let at = rewritten.len() - usize::from(rewritten.ends_with('/'));
+                    rewritten.insert_str(at, &format!(" source_path=\"{source}\""));
+                }
                 content.replace_range(start..end, &rewritten);
             }
             for (start, end) in ChatMarkupRegex::workspace_attachment_ranges(&content).into_iter().rev() {
@@ -427,41 +443,10 @@ impl ConversationService {
             .join("\n")
     }
 
-    /// Generates a summary while forwarding every provider retry error to its owner.
-    pub async fn generateSummary(
-        &self,
-        messages: Vec<(String, String)>,
-        previousSummary: Option<String>,
-        multiServiceManager: &mut MultiServiceManager,
-        onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<String, AiServiceError> {
-        self.generateSummaryFromPromptTurns(
-            messages
-                .into_iter()
-                .map(|(role, content)| PromptTurn::new(PromptTurnKind::from_role(&role), content))
-                .collect(),
-            previousSummary,
-            multiServiceManager,
-            onNonFatalError,
-        )
-        .await
-    }
-
-    /// Summarizes prepared turns with an explicit provider error consumer.
-    pub async fn generateSummaryFromPromptTurns(
-        &self,
-        messages: Vec<PromptTurn>,
-        previousSummary: Option<String>,
-        multiServiceManager: &mut MultiServiceManager,
-        onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<String, AiServiceError> {
-        self.generateSummaryWithProgress(messages, previousSummary, multiServiceManager, None, None, onNonFatalError).await.map(|(content, _)| content)
-    }
-
     /// Runs summary hooks and generation with progress and required retry-error delivery.
     pub async fn generateSummaryWithProgress(
         &self,
-        messages: Vec<PromptTurn>,
+        context: ConversationContext,
         previousSummary: Option<String>,
         multiServiceManager: &mut MultiServiceManager,
         progress: Option<SummaryProgressCallback>,
@@ -469,23 +454,28 @@ impl ConversationService {
         onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<(String, TokenCounts), AiServiceError> {
         let useEnglish = false;
-        let previousSummary = previousSummary.map(|summary| ChatMarkupRegex::remove_meta_tags(&summary));
-        let mut systemPrompt =
-            FunctionalPrompts::buildSummarySystemPrompt(previousSummary.as_deref(), useEnglish);
-        let modelParameters =
-            multiServiceManager.getModelParametersForFunction(FunctionType::SUMMARY)?;
+        let summaryConfig = multiServiceManager.getModelConfigForFunction(FunctionType::SUMMARY)?;
+        let sameModel = summaryConfig.providerId == context.model_binding.providerId
+            && summaryConfig.modelId == context.model_binding.modelId;
+        let modelParameters = if sameModel { context.model_parameters } else { summaryConfig.parameters };
+        let thinking = if sameModel { context.thinking } else { RequestThinking::default() };
+        let availableTools = context.available_tools;
+        let mut summaryHistory = context.history;
+        let mut systemPrompt = summaryHistory.iter().find(|turn| turn.kind == PromptTurnKind::SYSTEM)
+            .map(|turn| turn.content.clone()).unwrap_or_default();
         let serializedModelParameters = serializeSummaryHookModelParameters(&modelParameters);
         let summaryService = multiServiceManager.getServiceForFunction(FunctionType::SUMMARY)?;
         let providerModel = {
             let service = summaryService.lock().await;
             service.provider_model()
         };
-        let mut summaryHistory = stripSummaryMetaTurns(messages);
-        let mut summaryPrompt = FunctionalPrompts::summaryUserMessage(useEnglish).to_string();
+        let mut summaryPrompt = FunctionalPrompts::summaryContinuationInstruction(useEnglish);
         let executionContext = ToolExecutionManager::currentToolRuntimeContext();
         let summaryChatId = executionContext.as_ref().and_then(|context| context.callerChatId.clone());
         let mut baseSummaryMetadata = std::collections::HashMap::from([
             ("providerModel".to_string(), json!(providerModel)),
+            ("sameConversationModel".to_string(), json!(sameModel)),
+            ("availableToolCount".to_string(), json!(availableTools.len())),
             (
                 "sourceMessageCount".to_string(),
                 json!(summaryHistory.len()),
@@ -563,17 +553,19 @@ impl ConversationService {
         summaryPrompt = beforeSendContext
             .summary_prompt
             .expect("SummaryHookContext.summary_prompt must be present after before_send_to_model");
-        preparedHistory = stripSummaryMetaTurns(preparedHistory);
         if let Some(callback) = &progress { callback("summary_preparing"); }
+        let startedAtMs = currentTimeMillis();
+        let mut firstOutputAtMs = None::<i64>;
         let mut summaryStream = {
             let mut service = summaryService.lock().await;
+            service.reset_token_counts();
             service
                 .send_message(SendMessageRequest {
                     chat_history: preparedHistory.clone(),
                     model_parameters: modelParameters,
-                    thinking: RequestThinking::default(),
+                    thinking,
                     stream: true,
-                    available_tools: Vec::new(),
+                    available_tools: availableTools,
                     preserve_think_in_history: false,
                     enable_retry: true,
                     on_non_fatal_error: Some(onNonFatalError),
@@ -581,18 +573,33 @@ impl ConversationService {
                 })
                 .await?
         };
-        let mut content = String::new();
-        summaryStream.collect(&mut |chunk| content.push_str(&chunk)).await;
-        ensure_response_completed(summaryStream.as_ref())?;
-        let mut summaryContent = ChatMarkupRegex::remove_meta_tags(&removeThinkingContent(content.trim()));
-        let usage = {
-            let service = summaryService.lock().await;
-            TokenCounts {
-                input: service.input_token_count(),
-                cached_input: service.cached_input_token_count(),
-                output: service.output_token_count(),
+        let content = collect_response_text_observed(summaryStream, || {
+            if firstOutputAtMs.is_none() {
+                firstOutputAtMs = Some(currentTimeMillis());
             }
+        })
+        .await?;
+        let completedAtMs = currentTimeMillis();
+        if !ToolExecutionManager::extractToolInvocations(&content).is_empty() {
+            return Err(AiServiceError::RequestFailed("Conversation summary attempted to call a tool".into()));
+        }
+        let mut summaryContent = ChatMarkupRegex::remove_meta_tags(&removeThinkingContent(content.trim()));
+        let (usage, cacheWriteTokens, reasoningTokens) = {
+            let service = summaryService.lock().await;
+            (
+                TokenCounts {
+                    input: service.input_token_count(),
+                    cached_input: service.cached_input_token_count(),
+                    output: service.output_token_count(),
+                },
+                service.cache_write_input_token_count(),
+                service.reasoning_token_count(),
+            )
         };
+        operit_util::AppLogger::AppLogger::i("ConversationService", &format!(
+            "chat.summary.usage providerModel={} sameConversationModel={} inputTokens={} cachedInputTokens={} outputTokens={}",
+            providerModel, sameModel, usage.input, usage.cached_input, usage.output,
+        ));
 
         let afterGenerateContext =
             SummaryHookRegistry::dispatchSummaryGenerateHooks(SummaryHookContext {
@@ -637,16 +644,41 @@ impl ConversationService {
                 usage.cached_input,
             )
             .map_err(AiServiceError::RequestFailed)?;
+        let (estimatedCost, currency) = match summaryConfig.pricing.as_ref() {
+            Some(pricing) => (
+                calculate_model_cost(pricing, usage.input, usage.cached_input,
+                    cacheWriteTokens, usage.output),
+                pricing_currency_code(&pricing.currency).to_string(),
+            ),
+            None => (0.0, String::new()),
+        };
         UsageStatisticsStore::new()
-            .recordProviderModelRequest(
+            .recordProviderModelRequestDetailed(UsageRequestCapture {
                 providerModel,
-                FunctionType::SUMMARY,
-                UsageRequestSource::SUMMARY_GENERATION,
-                None,
-                usage.input,
-                usage.output,
-                usage.cached_input,
-            )
+                functionType: FunctionType::SUMMARY,
+                source: UsageRequestSource::SUMMARY_GENERATION,
+                chatId: None,
+                inputTokens: usage.input,
+                outputTokens: usage.output,
+                cachedInputTokens: usage.cached_input,
+                cacheWriteTokens,
+                reasoningTokens,
+                waitDurationMs: firstOutputAtMs
+                    .map(|first| (first - startedAtMs).max(0))
+                    .unwrap_or_else(|| (completedAtMs - startedAtMs).max(0)),
+                outputDurationMs: firstOutputAtMs
+                    .map(|first| (completedAtMs - first).max(0))
+                    .unwrap_or(0),
+                totalDurationMs: (completedAtMs - startedAtMs).max(0),
+                status: UsageRequestStatus::COMPLETED,
+                originNodeId: String::new(),
+                providerId: summaryConfig.providerId,
+                keyId: String::new(),
+                keyFingerprint: operit_model::ProviderQuota::mask_api_key_fingerprint(&summaryConfig.apiKey),
+                estimatedCost,
+                currency,
+                stream: true,
+            })
             .map_err(AiServiceError::RequestFailed)?;
         Ok((summaryContent, usage))
     }
@@ -675,6 +707,8 @@ impl ConversationService {
                 ),
             ),
         ];
+        let titleConfig = multi_service_manager
+            .getModelConfigForFunction(FunctionType::TITLE_GENERATION)?;
         let model_parameters =
             multi_service_manager.getModelParametersForFunction(FunctionType::TITLE_GENERATION)?;
         let title_service =
@@ -683,6 +717,8 @@ impl ConversationService {
             let service = title_service.lock().await;
             service.provider_model()
         };
+        let startedAtMs = currentTimeMillis();
+        let mut firstOutputAtMs = None::<i64>;
         let mut title_stream = {
             let mut service = title_service.lock().await;
             service
@@ -699,15 +735,21 @@ impl ConversationService {
                 })
                 .await?
         };
-        let mut title_content = String::new();
-        title_stream.collect(&mut |chunk| title_content.push_str(&chunk)).await;
-        ensure_response_completed(title_stream.as_ref())?;
+        let title_content = collect_response_text_observed(title_stream, || {
+            if firstOutputAtMs.is_none() {
+                firstOutputAtMs = Some(currentTimeMillis());
+            }
+        })
+        .await?;
+        let completedAtMs = currentTimeMillis();
         let title = sanitizeConversationTitle(&removeThinkingContent(&title_content));
-        let (input_tokens, cached_input_tokens, output_tokens) = {
+        let (input_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, output_tokens) = {
             let service = title_service.lock().await;
             (
                 service.input_token_count(),
                 service.cached_input_token_count(),
+                service.cache_write_input_token_count(),
+                service.reasoning_token_count(),
                 service.output_token_count(),
             )
         };
@@ -720,16 +762,44 @@ impl ConversationService {
                 cached_input_tokens,
             )
             .map_err(AiServiceError::RequestFailed)?;
+        let totalDurationMs = (completedAtMs - startedAtMs).max(0);
+        let waitDurationMs = firstOutputAtMs
+            .map(|first| (first - startedAtMs).max(0))
+            .unwrap_or(totalDurationMs);
+        let outputDurationMs = firstOutputAtMs
+            .map(|first| (completedAtMs - first).max(0))
+            .unwrap_or(0);
+        let (estimatedCost, currency) = match titleConfig.pricing.as_ref() {
+            Some(pricing) => (
+                calculate_model_cost(pricing, input_tokens, cached_input_tokens,
+                    cache_write_tokens, output_tokens),
+                pricing_currency_code(&pricing.currency).to_string(),
+            ),
+            None => (0.0, String::new()),
+        };
         UsageStatisticsStore::new()
-            .recordProviderModelRequest(
-                provider_model,
-                FunctionType::TITLE_GENERATION,
-                UsageRequestSource::TITLE_GENERATION,
-                None,
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-            )
+            .recordProviderModelRequestDetailed(UsageRequestCapture {
+                providerModel: provider_model,
+                functionType: FunctionType::TITLE_GENERATION,
+                source: UsageRequestSource::TITLE_GENERATION,
+                chatId: None,
+                inputTokens: input_tokens,
+                outputTokens: output_tokens,
+                cachedInputTokens: cached_input_tokens,
+                cacheWriteTokens: cache_write_tokens,
+                reasoningTokens: reasoning_tokens,
+                waitDurationMs,
+                outputDurationMs,
+                totalDurationMs,
+                status: UsageRequestStatus::COMPLETED,
+                originNodeId: String::new(),
+                providerId: titleConfig.providerId,
+                keyId: String::new(),
+                keyFingerprint: operit_model::ProviderQuota::mask_api_key_fingerprint(&titleConfig.apiKey),
+                estimatedCost,
+                currency,
+                stream: false,
+            })
             .map_err(AiServiceError::RequestFailed)?;
         Ok(title)
     }
@@ -758,6 +828,7 @@ impl ConversationService {
         build_media_intent_prompt("video", video_path, user_intent)
     }
 
+    /// Selects persisted model projections and imports legacy file-mutation summaries.
     fn normalize_tool_result_markup_for_model(&self, content: &str) -> String {
         let blocks = ChatMarkupRegex::tool_result_blocks(content);
         if blocks.is_empty() {
@@ -768,14 +839,20 @@ impl ConversationService {
         let mut cursor = 0usize;
         for block in blocks {
             normalized.push_str(&content[cursor..block.start]);
+            if attr_value(&block.raw, "model_content").is_some() {
+                let parts = operit_model::MessagePartCodec::MessagePartCodec::parseAssistantMarkupForImport(&block.raw);
+                normalized.push_str(&operit_model::MessagePartCodec::MessagePartCodec::assistantMarkup(&parts));
+                cursor = block.end;
+                continue;
+            }
             let tool_name = attr_value(&block.raw, "name").unwrap_or_default();
-            if !tool_name.eq_ignore_ascii_case(APPLY_FILE_TOOL_NAME) {
+            if !FILE_MUTATION_TOOL_NAMES.iter().any(|name| tool_name.eq_ignore_ascii_case(name)) {
                 normalized.push_str(&block.raw);
                 cursor = block.end;
                 continue;
             }
 
-            let Some(request_content) = self.extract_apply_file_request_content(&block.body) else {
+            let Some(request_content) = self.extract_file_mutation_request_content(&block.body) else {
                 normalized.push_str(&block.raw);
                 cursor = block.end;
                 continue;
@@ -795,7 +872,8 @@ impl ConversationService {
         normalized
     }
 
-    fn extract_apply_file_request_content(&self, tool_result_body: &str) -> Option<String> {
+    /// Reads the explicit request summary from historical file-mutation display markup.
+    fn extract_file_mutation_request_content(&self, tool_result_body: &str) -> Option<String> {
         let content_body = extract_xml_tag_body_case_insensitive(tool_result_body, "content")
             .unwrap_or(tool_result_body);
         let file_request_content_regex = Regex::new(
@@ -837,11 +915,6 @@ fn build_prepare_history_metadata(
         "workspaceFolders".to_string(),
         serde_json::to_string(&request.workspace_folders)
             .expect("workspace folder paths must serialize"),
-    );
-    insert_option(
-        &mut metadata,
-        "customSystemPromptTemplate",
-        request.custom_system_prompt_template.as_ref(),
     );
     insert_option(
         &mut metadata,
@@ -915,9 +988,12 @@ fn buildSummaryPreparedHistory(
     chatHistory: Vec<PromptTurn>,
     summaryPrompt: String,
 ) -> Vec<PromptTurn> {
-    let mut prepared = Vec::with_capacity(chatHistory.len() + 2);
-    prepared.push(PromptTurn::new(PromptTurnKind::SYSTEM, systemPrompt));
-    prepared.extend(chatHistory);
+    let mut prepared = chatHistory;
+    if let Some(system) = prepared.iter_mut().find(|turn| turn.kind == PromptTurnKind::SYSTEM) {
+        system.content = systemPrompt;
+    } else if !systemPrompt.is_empty() {
+        prepared.insert(0, PromptTurn::new(PromptTurnKind::SYSTEM, systemPrompt));
+    }
     prepared.push(PromptTurn::new(PromptTurnKind::USER, summaryPrompt));
     prepared
 }
@@ -962,17 +1038,6 @@ fn serializeSummaryHookModelParameters(
                 ),
                 ("isCustom".to_string(), json!(parameter.isCustom)),
             ])
-        })
-        .collect()
-}
-
-#[allow(non_snake_case)]
-fn stripSummaryMetaTurns(messages: Vec<PromptTurn>) -> Vec<PromptTurn> {
-    messages
-        .into_iter()
-        .map(|mut turn| {
-            turn.content = ChatMarkupRegex::remove_meta_tags(&turn.content);
-            turn
         })
         .collect()
 }
@@ -1067,6 +1132,45 @@ mod summary_tests {
     use super::*;
     use crate::chat::hooks::SummaryHookRegistry::{applySummaryHookMutation, SummaryHookMutation};
 
+    /// Projects both historical mutation markup and persisted explicit model content on replay.
+    #[test]
+    fn file_mutation_history_preserves_reasoning_and_ordinary_reads() {
+        use crate::chat::llmprovider::ProviderMediaTestSupport::test_runtime_context;
+        use operit_tools::ConversationMarkupManager::{ConversationMarkupManager, ToolResult};
+        use operit_plugin_sdk::js_sdk::results::{FileApplyResultData, FileOperationData, ToolResultData};
+        let service = ConversationService::new(test_runtime_context());
+        let data = FileApplyResultData {
+            operation: FileOperationData {
+                operation: "write".into(), path: "/a".into(), successful: true,
+                details: "Updated /a".into(),
+            },
+            diffContent: Some("+private_source".into()), aiDiffInstructions: String::new(),
+        };
+        for name in FILE_MUTATION_TOOL_NAMES {
+            let historical = format!("<tool_result name=\"{name}\" status=\"success\"><content>{}</content></tool_result>", data.toString());
+            let projected = service.normalize_tool_result_markup_for_model(&historical);
+            assert!(projected.contains("Changes: +1 -0 lines"));
+            assert!(!projected.contains("private_source"));
+        }
+        let result = ToolResult {
+            toolName: "custom:edit".into(), success: true, error: None,
+            result: ToolResultData::FileApplyResultData(data.clone()),
+        };
+        let display = ConversationMarkupManager::formatToolResultForDisplay(&result, None);
+        let read = format!("<tool_result name=\"read_file\" status=\"success\"><content>{}</content></tool_result>", data.toString());
+        let reasoning = "<think>retained reasoning</think>";
+        let turns = vec![
+            PromptTurn::new(PromptTurnKind::ASSISTANT, format!("{reasoning}{display}{read}")),
+            PromptTurn::new(PromptTurnKind::USER, display.clone()),
+        ];
+        let projected = service.normalize_conversation_history_for_model(&turns);
+        assert!(projected[0].content.starts_with(reasoning));
+        assert!(projected[0].content.ends_with(&read));
+        assert_eq!(projected[0].content.matches("private_source").count(), 1);
+        assert_eq!(projected[1].content, display);
+        assert_eq!(service.normalize_conversation_history_for_model(&projected)[0].content, projected[0].content);
+    }
+
     /// Keeps both trigger names and the derived ratio stable across plugin metadata edits.
     #[test]
     fn automatic_summary_trigger_preserves_the_hook_contract() {
@@ -1157,31 +1261,96 @@ mod summary_tests {
         assert!(validateSummaryContent(" \n\t").is_err());
     }
 
+    /// Keeps previous checkpoints in history while appending either language's summary directive.
     #[test]
     fn summary_prompt_inherits_previous_summary_in_both_languages() {
         for use_english in [false, true] {
             let previous = "Important context from the previous conversation.";
-            let prompt = FunctionalPrompts::buildSummarySystemPrompt(Some(previous), use_english);
-            assert!(prompt.starts_with(FunctionalPrompts::summaryPrompt(use_english)));
-            assert_eq!(prompt.matches(previous).count(), 1);
-            assert_eq!(
-                FunctionalPrompts::buildSummarySystemPrompt(Some(" \n"), use_english),
-                FunctionalPrompts::summaryPrompt(use_english)
+            let history = vec![
+                PromptTurn::new(PromptTurnKind::SYSTEM, "conversation rules"),
+                PromptTurn::new(PromptTurnKind::SUMMARY, previous),
+                PromptTurn::new(PromptTurnKind::USER, "new question"),
+            ];
+            let prepared = buildSummaryPreparedHistory(
+                "conversation rules".into(), history.clone(),
+                FunctionalPrompts::summaryContinuationInstruction(use_english),
             );
+            assert_eq!(&prepared[..history.len()], history.as_slice());
+            assert_eq!(prepared.iter().filter(|turn| turn.content == previous).count(), 1);
+            assert_eq!(prepared.last().unwrap().kind, PromptTurnKind::USER);
+            assert!(prepared.last().unwrap().content.contains(FunctionalPrompts::summaryPrompt(use_english)));
         }
     }
 
+    /// Keeps provider reasoning signatures and structured identities in the cached prefix.
     #[test]
-    fn removes_protocol_meta_without_changing_turn_identity() {
+    fn summary_retains_protocol_meta_and_turn_identity() {
         let mut turn = PromptTurn::new(
             PromptTurnKind::ASSISTANT,
             r#"before<meta provider="openai:reasoning">SECRET</meta>after"#,
         );
         turn.metadata.insert("author".to_string(), json!("participant"));
-        let cleaned = stripSummaryMetaTurns(vec![turn.clone()]);
-        assert_eq!(cleaned[0].content, "before after");
-        assert_eq!(cleaned[0].kind, turn.kind);
-        assert_eq!(cleaned[0].metadata, turn.metadata);
+        let history = vec![
+            PromptTurn::new(PromptTurnKind::SYSTEM, "original rules"),
+            PromptTurn::new(PromptTurnKind::SUMMARY, "previous checkpoint"),
+            PromptTurn::new(PromptTurnKind::USER, "question"),
+            turn,
+            PromptTurn::new(PromptTurnKind::TOOL_CALL, "call"),
+            PromptTurn::new(PromptTurnKind::TOOL_RESULT, "result"),
+        ];
+        let prepared = buildSummaryPreparedHistory(
+            "original rules".into(), history.clone(), FunctionalPrompts::summaryContinuationInstruction(false),
+        );
+        assert_eq!(&prepared[..history.len()], history.as_slice());
+        assert_eq!(prepared.len(), history.len() + 1);
+        assert_eq!(prepared.last().unwrap().kind, PromptTurnKind::USER);
+    }
+
+    /// Exercises real provider serializers rather than comparing only internal message structs.
+    #[test]
+    fn summary_wire_requests_preserve_deepseek_and_responses_prefixes() {
+        use crate::chat::llmprovider::DeepseekProvider::DeepseekProvider;
+        use crate::chat::llmprovider::OpenAIResponsesProvider::OpenAIResponsesProvider;
+        use crate::chat::llmprovider::ProviderMediaTestSupport::{send_request, test_runtime_context};
+        use operit_model::ToolPrompt::ToolPrompt;
+
+        let history = vec![
+            PromptTurn::new(PromptTurnKind::SYSTEM, "original system"),
+            PromptTurn::new(PromptTurnKind::SUMMARY, "original checkpoint"),
+            PromptTurn::new(PromptTurnKind::USER, "original question"),
+            PromptTurn::new(PromptTurnKind::ASSISTANT, "original reply"),
+        ];
+        let mut chat = send_request(history.clone());
+        chat.available_tools = vec![ToolPrompt::new("read_file".into(), "Read a file".into())];
+        let mut summary = send_request(buildSummaryPreparedHistory(
+            "original system".into(), history, FunctionalPrompts::summaryContinuationInstruction(false),
+        ));
+        summary.available_tools = chat.available_tools.clone();
+
+        for endpoint in ["https://fixture.invalid/chat/completions", "https://fixture.invalid/responses"] {
+            let provider = DeepseekProvider::new(
+                endpoint.into(), String::new().into(), "deepseek-flash".into(), "DEEPSEEK".into(),
+                Vec::new(), false, false, false, Vec::new(), true, test_runtime_context(),
+            );
+            let original = provider.create_request_body(&chat).unwrap();
+            let compact = provider.create_request_body(&summary).unwrap();
+            let field = if endpoint.ends_with("responses") { "input" } else { "messages" };
+            let prefix = original[field].as_array().unwrap();
+            assert_eq!(&compact[field].as_array().unwrap()[..prefix.len()], prefix.as_slice());
+            assert_eq!(original["tools"], compact["tools"]);
+        }
+
+        let responses = OpenAIResponsesProvider::new(
+            "https://fixture.invalid/responses".into(), String::new().into(), "test".into(),
+            "OPENAI_RESPONSES".into(), Vec::new(), false, false, false, Vec::new(), true, test_runtime_context(),
+        );
+        let original = responses.create_request_body(&chat).unwrap();
+        let compact = responses.create_request_body(&summary).unwrap();
+        assert_eq!(original["prompt_cache_key"], compact["prompt_cache_key"]);
+        assert!(original["prompt_cache_key"].is_string());
+        let prefix = original["input"].as_array().unwrap();
+        assert_eq!(&compact["input"].as_array().unwrap()[..prefix.len()], prefix.as_slice());
+        assert_eq!(original["tools"], compact["tools"]);
     }
 }
 
@@ -1206,8 +1375,8 @@ mod relative_attachment_tests {
             assert!(visible.contains(r#"id=".operit/attachments/id/report.pdf""#));
             assert!(visible.contains(r#"path=".operit/attachments/id/report.pdf""#));
             assert!(visible.contains(r#"node_id="source""#));
+            assert!(visible.contains(&format!(r#"source_path="source://{}/.operit/attachments/id/report.pdf""#, base.trim_start_matches('/'))));
             assert!(visible.ends_with(">body</attachment>"));
-            assert!(!visible.contains("/operitapp/"));
         }
     }
 
@@ -1219,6 +1388,22 @@ mod relative_attachment_tests {
         let path = unescape_xml_attribute(&attr_value(&visible, "path").unwrap());
         assert_eq!(VfsPath::resolveFileToolPath(Some("/operitapp/workspaces/project"), &path).unwrap(),
             "/operitapp/outputs/family/.operit/attachments/id/file.pdf");
+    }
+
+    /// A source address stays absolute when the execution directory belongs to another conversation.
+    #[test]
+    fn remote_attachment_source_survives_rebasing_and_xml_escaping() {
+        let path = "/operitapp/outputs/phone/.operit/attachments/id/图 & \"quote\".png";
+        let content = r#"<attachment path="/operitapp/outputs/phone/.operit/attachments/id/图 &amp; &quot;quote&quot;.png" node_id="android-source"/>"#;
+        let visible = prepared(content, "/operitapp/outputs/desktop");
+        assert!(visible.ends_with("/>"));
+        let source = unescape_xml_attribute(&attr_value(&visible, "source_path").unwrap());
+        assert_eq!(source, format!("android-source:/{path}"));
+        assert_eq!(prepared(&visible, "/operitapp/outputs/desktop"), visible);
+        let local = unescape_xml_attribute(&attr_value(&visible, "path").unwrap());
+        assert_eq!(VfsPath::resolveFileToolPath(Some("/operitapp/outputs/desktop"), &local).unwrap(), path);
+        let legacy = prepared(r#"<attachment path="/operitapp/outputs/phone/file.png"/>"#, "/operitapp/outputs/desktop");
+        assert!(!legacy.contains("source_path="));
     }
 
     #[test]

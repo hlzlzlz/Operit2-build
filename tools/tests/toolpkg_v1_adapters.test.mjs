@@ -46,6 +46,10 @@ function engine(version = '1.0.0') {
   }
   const tools = {
     Files: files,
+    Net: {
+      /** Captures the current dialog action without changing legacy receipts. */
+      async browserDialog(options) { calls.push({ name: 'browserDialog', args: [options] }); return '{"dialog":null}'; },
+    },
     SoftwareSettings: {
       /** Returns the exact current host result for the versioned legacy variable reader. */
       async readEnvironmentVariable(packageName, key) { calls.push({ name: 'readEnvironmentVariable', args: [packageName, key] }); return { key, value: 'configured', exists: true, toString() { return this.value; } }; },
@@ -117,6 +121,39 @@ function engine(version = '1.0.0') {
   for (const file of ['files.js', 'media.js', 'chat.js', 'workflow.js', 'characters.js', 'memory.js', 'install.js']) vm.runInContext(source(adapterRoot + file), context);
   return { context, tools, calls };
 }
+
+/** Verifies the v1 method remains available without changing the frozen v1 declarations. */
+test('browser dialog v1 method maps boolean responses and is hidden from v2', async () => {
+  const runtime = engine();
+  for (const version of ['1.0.0', '1.0.1']) {
+    runtime.context.version = version;
+    for (const [options, expected] of [
+      [{ accept: true }, { action: 'accept' }],
+      [{ accept: true, promptText: '' }, { action: 'accept', promptText: '' }],
+      [{ accept: true, promptText: '  雪  ' }, { action: 'accept', promptText: '  雪  ' }],
+      [{ accept: false, promptText: 'ignored' }, { action: 'dismiss' }],
+    ]) {
+      assert.equal(await runtime.context.Tools.Net.browserHandleDialog(options), 'OK');
+      assert.deepEqual(plain(runtime.calls.at(-1)), { name: 'browserDialog', args: [expected] });
+    }
+  }
+  const retained = runtime.context.Tools.Net.browserHandleDialog;
+  runtime.context.version = '2.0.0';
+  assert.equal(runtime.context.Tools.Net.browserHandleDialog, undefined);
+  assert.throws(() => retained({ accept: true }), /no implementation for ToolPkg API 2\.0\.0/);
+  assert.equal(await runtime.context.Tools.Net.browserDialog({ action: 'get' }), '{"dialog":null}');
+});
+
+/** Propagates host failures and validates boolean responses before invoking the host. */
+test('browser dialog v1 method retains original host errors', async () => {
+  const runtime = engine();
+  const failure = new Error('No active browser dialog');
+  const respond = runtime.context.__operitCreateV1BrowserDialog(async () => { throw failure; });
+  await assert.rejects(respond({ accept: true }), error => error === failure);
+  for (const options of [undefined, null, {}, { accept: 'true' }]) {
+    await assert.rejects(respond(options), /boolean accept/);
+  }
+});
 
 /** Checks the copied handwritten contract remains byte-identical to its recorded source. */
 test('v1 declarations match their recorded source hashes', () => {
@@ -196,6 +233,35 @@ test('v1 nested and search results restore environments and paths', async () => 
   assert.equal(grep.filePattern, '*.txt');
   assert.equal(grep.matches[0].filePath, '/work/found.txt');
   assert.deepEqual(plain(grep.matches[0].lineMatches[0]), { lineNumber: 1, lineContent: 'text' });
+});
+
+/** Keeps the legacy search functional when the current SDK only provides regex grep. */
+test('v1 intent search retains its defaults and result mapping through current grep', async () => {
+  for (const version of ['1.0.0', '1.0.1']) {
+    const { context, tools, calls } = engine(version);
+    const failure = new Error('Search host failed');
+    const current = {
+      /** Provides only the supported current search operation. */
+      async grep(...args) {
+        calls.push({ name: 'grep', args });
+        return { searchPath: args[0], pattern: args[1], totalMatches: 1, filesSearched: 1,
+          matches: [{ filePath: args[0] + '/found.txt', lineMatches: [] }] };
+      },
+    };
+    const legacy = context.__operitCreateV1Files(current);
+    const result = await legacy.grepContext('/work', 'text', { environment: 'linux', file_pattern: '*.txt' });
+    assert.deepEqual(plain(calls.at(-1)), { name: 'grep', args: ['/virtual/linux/work', 'text', {
+      file_pattern: '*.txt', case_insensitive: true, context_lines: 8, max_results: 10,
+    }] });
+    assert.equal(result.env, 'linux');
+    assert.equal(result.searchPath, '/work');
+    assert.equal(result.matches[0].filePath, '/work/found.txt');
+    await tools.Files.grepContext('/work', 'text', { environment: 'linux', max_results: 3 });
+    assert.equal(calls.at(-1).args[2].max_results, 3);
+    /** Preserves the original host rejection without retrying or converting it. */
+    current.grep = async () => { throw failure; };
+    await assert.rejects(legacy.grepContext('/work', 'text', { environment: 'linux' }), error => error === failure);
+  }
 });
 
 /** Checks headers remain the third current argument rather than the legacy environment. */

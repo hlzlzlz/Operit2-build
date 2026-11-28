@@ -204,7 +204,7 @@ function __operitInstallV1Runtime(runtime) {
         return mapped;
     }
 
-    /** Rewrites only admitted legacy package identities while preserving every public overload.
+    /** Translates admitted v1 tool identities and arguments while preserving public overloads.
      * @param {...any} args
      * @returns {Promise<any>}
      */
@@ -219,6 +219,44 @@ function __operitInstallV1Runtime(runtime) {
         } else {
             if (typeof args[1] === 'string') { type = args[0]; index = 1; }
             name = args[index];
+        }
+        if (type === 'default' && name === 'grep_context') {
+            var objectCall = args[0] !== null && typeof args[0] === 'object';
+            var parameters = objectCall ? args[0].params : args[index + 1];
+            var { intent, ...search } = parameters;
+            var grepParams = Object.assign({}, search, {
+                pattern: intent,
+                case_insensitive: true,
+                context_lines: search.context_lines === undefined ? 8 : search.context_lines,
+                max_results: search.max_results === undefined ? 10 : search.max_results,
+            });
+            if (objectCall) {
+                rewritten[0] = Object.assign({}, args[0], { name: 'grep_code', params: grepParams });
+            } else {
+                rewritten[index] = 'grep_code';
+                rewritten[index + 1] = grepParams;
+            }
+            return originalToolCall.apply(runtime, rewritten);
+        }
+        if (type === 'default' && name === 'browser_handle_dialog') {
+            var objectCall = args[0] !== null && typeof args[0] === 'object';
+            var parameters = objectCall ? args[0].params : args[index + 1];
+            var accept = parameters && parameters.accept;
+            if (accept !== true && accept !== false && accept !== 'true' && accept !== 'false') {
+                throw new TypeError('browser_handle_dialog requires a boolean accept');
+            }
+            var accepted = accept === true || accept === 'true';
+            var dialogParams = accepted && parameters.promptText !== undefined
+                ? { action: 'accept', promptText: parameters.promptText }
+                : { action: accepted ? 'accept' : 'dismiss' };
+            if (objectCall) {
+                rewritten[0] = Object.assign({}, args[0], { name: 'browser_dialog', params: dialogParams });
+            } else {
+                rewritten[index] = 'browser_dialog';
+                rewritten[index + 1] = dialogParams;
+            }
+            await originalToolCall.apply(runtime, rewritten);
+            return 'OK';
         }
         if (type === 'default' && Object.prototype.hasOwnProperty.call(routes, name)) {
             var target = routes[/** @type {keyof typeof routes} */ (name)];
@@ -413,9 +451,14 @@ function __operitInstallV1Runtime(runtime) {
     }
     var legacyFiles = __operitCreateV1Files(files);
     for (var name of Object.keys(legacyFiles)) {
-        runtime.Tools.Files[name] = api.method()
-            .between('1.0.0', '2.0.0', legacyFiles[/** @type {keyof typeof legacyFiles} */ (name)])
-            .since('2.0.0', canonical.Files[/** @type {keyof typeof canonical.Files} */ (name)])
-            .build('Tools.Files.' + name);
+        /** Keeps v1 methods that the current API family retired on the legacy range only. */
+        var methodBuilder = api.method()
+            .between('1.0.0', '2.0.0', legacyFiles[/** @type {keyof typeof legacyFiles} */ (name)]);
+        var canonicalImplementation =
+            canonical.Files[/** @type {keyof typeof canonical.Files} */ (name)];
+        if (typeof canonicalImplementation === 'function') {
+            methodBuilder = methodBuilder.since('2.0.0', canonicalImplementation);
+        }
+        runtime.Tools.Files[name] = methodBuilder.build('Tools.Files.' + name);
     }
 }

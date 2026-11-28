@@ -20,7 +20,8 @@ use super::StructuredToolCallBridge::StructuredToolCallBridge;
 use super::ThinkingDialect::{apply_thinking, ThinkingDialect};
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, retry_error_text, retry_message, AIService, AiServiceError,
-    SendMessageRequest, SharedAiResponseStream, TokenCounts,
+    SendMessageRequest, SharedAiResponseStream, ExtendedTokenCounts, TokenCounts,
+    parse_extended_usage_counts,
 };
 use crate::chat::llmprovider::MediaLinkParser::{MediaLink, MediaLinkParser};
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
@@ -53,6 +54,7 @@ pub struct OpenAIProvider {
     pub enable_tool_call: bool,
     pub custom_headers: Vec<(String, String)>,
     pub preserve_reasoning_content: bool,
+    gateway_binding: Option<String>,
     responsesProtocol: ResponsesStreamProtocol,
     use_responses_api: bool,
     state: Arc<Mutex<OpenAIProviderState>>,
@@ -68,6 +70,8 @@ pub(crate) enum ResponsesStreamProtocol {
 struct OpenAIProviderState {
     inputTokenCount: i64,
     cachedInputTokenCount: i64,
+    cacheWriteInputTokenCount: i64,
+    reasoningTokenCount: i64,
     outputTokenCount: i64,
     cancelled: bool,
     cancelGeneration: u64,
@@ -81,6 +85,8 @@ impl Default for OpenAIProviderState {
         Self {
             inputTokenCount: 0,
             cachedInputTokenCount: 0,
+            cacheWriteInputTokenCount: 0,
+            reasoningTokenCount: 0,
             outputTokenCount: 0,
             cancelled: false,
             cancelGeneration: 0,
@@ -93,6 +99,7 @@ impl Default for OpenAIProviderState {
 pub struct StreamingState {
     pub chunks: Vec<String>,
     pub usage: TokenCounts,
+    pub extendedUsage: ExtendedTokenCounts,
     pub chunkCount: i32,
     pub isInReasoningMode: bool,
     pub hasEmittedThinkStart: bool,
@@ -502,6 +509,7 @@ impl OpenAIProvider {
             enable_tool_call,
             custom_headers,
             preserve_reasoning_content: false,
+            gateway_binding: None,
             responsesProtocol: ResponsesStreamProtocol::OpenAi,
             use_responses_api: false,
             state: Arc::new(Mutex::new(OpenAIProviderState::default())),
@@ -559,10 +567,17 @@ impl OpenAIProvider {
             enable_tool_call,
             custom_headers,
             preserve_reasoning_content,
+            gateway_binding: None,
             responsesProtocol: ResponsesStreamProtocol::OpenAi,
             use_responses_api: false,
             state: Arc::new(Mutex::new(OpenAIProviderState::default())),
         }
+    }
+
+    /// Sends HTTP requests through the gateway device's Binding route.
+    pub fn with_gateway_binding(mut self, binding: String) -> Self {
+        self.gateway_binding = Some(binding);
+        self
     }
 
     /// Selects rich tool-output support by API protocol, matching Kotlin useResponsesApi.
@@ -633,6 +648,17 @@ impl OpenAIProvider {
         }
     }
 
+    pub(super) fn apply_extended_token_counts(&self, extended: ExtendedTokenCounts) {
+        if let Ok(mut state) = self.state.lock() {
+            if extended.cache_write_input > 0 {
+                state.cacheWriteInputTokenCount = extended.cache_write_input;
+            }
+            if extended.reasoning > 0 {
+                state.reasoningTokenCount = extended.reasoning;
+            }
+        }
+    }
+
     fn set_estimated_output_tokens(&self, text: &str) {
         let estimated = ChatUtils::estimate_token_count(text);
         if estimated <= 0 {
@@ -686,7 +712,8 @@ impl OpenAIProvider {
         &self,
         request: super::ProviderHttp::RequestBuilder,
     ) -> Result<super::ProviderHttp::Response, AiServiceError> {
-        let request = request.key_getter(self.key_getter.clone(), self.key_authentication());
+        let request = request.key_getter(self.key_getter.clone(), self.key_authentication())
+            .gateway_binding(self.gateway_binding.clone());
         let provider_model = self.provider_model();
         let endpoint = self.diagnosticEndpoint()?;
         let started_at = currentTimeMillis();
@@ -1286,6 +1313,7 @@ impl OpenAIProvider {
                 cached_input: 0,
                 output: 0,
             },
+            extendedUsage: ExtendedTokenCounts::default(),
             chunkCount: 0,
             isInReasoningMode: false,
             hasEmittedThinkStart: false,
@@ -1357,6 +1385,7 @@ impl OpenAIProvider {
                     // Keep completion accounting available when this stream is interrupted.
                     self.set_estimated_output_tokens(&emitter.received_content);
                     self.apply_token_counts(state.usage.clone());
+                    self.apply_extended_token_counts(state.extendedUsage.clone());
                     if state.streamEndReceived {
                         break;
                     }
@@ -1379,6 +1408,7 @@ impl OpenAIProvider {
 
             self.set_estimated_output_tokens(&emitter.received_content);
             self.apply_token_counts(state.usage.clone());
+            self.apply_extended_token_counts(state.extendedUsage.clone());
             AppLogger::v_with_level(
                 PROVIDER_TRANSPORT_LOG_TAG,
                 &format!(
@@ -1810,6 +1840,7 @@ impl OpenAIProvider {
         if choices.map(|items| items.is_empty()).unwrap_or(true) {
             if let Some(usage) = usage {
                 state.usage = parse_usage_counts(usage);
+                state.extendedUsage = parse_extended_usage_counts(usage);
             }
             return Ok(());
         }
@@ -1862,6 +1893,7 @@ impl OpenAIProvider {
 
         if let Some(usage) = usage {
             state.usage = parse_usage_counts(usage);
+            state.extendedUsage = parse_extended_usage_counts(usage);
         }
         Ok(())
     }
@@ -2126,6 +2158,7 @@ impl OpenAIProvider {
                 self.closeAllOpenToolCalls(state);
                 if let Some(usage) = response.get("usage") {
                     state.usage = parse_usage_counts(usage);
+                    state.extendedUsage = parse_extended_usage_counts(usage);
                 }
                 state.streamCompletionConfirmed = true;
             }
@@ -2491,14 +2524,34 @@ impl AIService for OpenAIProvider {
             .unwrap_or(0)
     }
 
+    fn cache_write_input_token_count(&self) -> i64 {
+        self.state
+            .lock()
+            .map(|state| state.cacheWriteInputTokenCount)
+            .unwrap_or(0)
+    }
+
+    fn reasoning_token_count(&self) -> i64 {
+        self.state
+            .lock()
+            .map(|state| state.reasoningTokenCount)
+            .unwrap_or(0)
+    }
+
     fn provider_model(&self) -> String {
-        format!("{}:{}", self.provider_type, self.model_name)
+        let provider = match self.gateway_binding {
+            Some(_) => "LOCAL_GATEWAY",
+            None => &self.provider_type,
+        };
+        format!("{provider}:{}", self.model_name)
     }
 
     fn reset_token_counts(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.inputTokenCount = 0;
             state.cachedInputTokenCount = 0;
+            state.cacheWriteInputTokenCount = 0;
+            state.reasoningTokenCount = 0;
             state.outputTokenCount = 0;
             state.tokenCacheManager.reset_token_counts();
         }
@@ -2521,6 +2574,7 @@ impl AIService for OpenAIProvider {
 
     async fn test_connection(&self) -> Result<String, AiServiceError> {
         let response = super::ProviderHttp::post(&self.api_endpoint)
+            .gateway_binding(self.gateway_binding.clone())
             .key_getter(self.key_getter.clone(), self.key_authentication())
             .headers(self.headers()?)
             .json(&json!({
@@ -2797,6 +2851,9 @@ impl OpenAIProvider {
         chunks.extend(nativeToolCallChunks);
         self.set_estimated_output_tokens(&chunks.concat());
         self.apply_token_counts(token_counts);
+        if let Some(usage) = json_response.get("usage") {
+            self.apply_extended_token_counts(parse_extended_usage_counts(usage));
+        }
         Ok(chunks)
     }
 }

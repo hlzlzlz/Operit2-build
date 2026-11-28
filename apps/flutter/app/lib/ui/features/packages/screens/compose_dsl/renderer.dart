@@ -300,6 +300,31 @@ class _ComposeProgramExecutorState extends State<_ComposeProgramExecutor> {
   Widget _executeInstruction(BuildContext context) {
     final type = node.type;
     switch (type) {
+      case 'MediaStage':
+        final window = FloatingWindowScope.maybeOf(context);
+        if (window == null) {
+          throw StateError('MediaStage requires a floating window');
+        }
+        return MediaStage(
+          camera: props['camera'] == true ? window.camera : null,
+          appearance: window.appearance,
+          imageUri: props['imageUri'] as String?,
+          imageTitle: props['imageTitle'] as String?,
+          participants: [
+            for (final member in (props['participants'] as List? ?? const []))
+              MediaStageParticipant(
+                id: (member as Map)['id'] as String,
+                title: member['title'] as String,
+                imageUri: member['imageUri'] as String?,
+              ),
+          ],
+          activeParticipantId: props['activeParticipantId'] as String?,
+          cameraReadyText: props['cameraReadyText'] as String?,
+          fullscreen: window.fullscreen,
+          windowControls: window.toolbar,
+          resizeHandle: window.resizeHandle,
+          controls: _decoratorChild(),
+        );
       case 'GradientRule':
         return DecoratedBox(
           decoration: BoxDecoration(

@@ -45,7 +45,6 @@ pub struct ToolResultMap {
     #[display(action = "search", icon = "search", target = "pattern")]
     pub grep_code: GrepResultData,
     #[display(action = "search", icon = "search", target = "pattern")]
-    pub grep_context: GrepResultData,
     #[display(action = "info", icon = "file", target = "path")]
     pub file_info: FileInfoData,
     #[display(action = "archive", icon = "folder", target = "destination")]
@@ -78,7 +77,7 @@ pub struct ToolResultMap {
     pub browser_evaluate: String,
     pub browser_file_upload: String,
     pub browser_fill_form: String,
-    pub browser_handle_dialog: String,
+    pub browser_dialog: String,
     pub browser_hover: String,
     #[display(action = "visit", icon = "web", target = "url")]
     pub browser_navigate: String,

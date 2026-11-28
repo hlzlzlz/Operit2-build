@@ -974,6 +974,15 @@ class AppLocalizationsFr extends AppLocalizations {
   String get chatSpeechNoTextRecognized => 'Aucune parole reconnue.';
 
   @override
+  String get chatVoiceListening => 'Écoute en cours…';
+
+  @override
+  String get chatVoiceStopListening => 'Arrêter la saisie vocale';
+
+  @override
+  String get chatVoiceThinking => 'reconnaissance';
+
+  @override
   String get history => 'Historique';
 
   @override
@@ -1026,6 +1035,9 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get openFile => 'Ouvrir le fichier';
+
+  @override
+  String get openInOtherApp => 'Ouvrir avec une autre app';
 
   @override
   String get workspaceFileOpening => 'Ouverture du fichier…';
@@ -1855,6 +1867,13 @@ class AppLocalizationsFr extends AppLocalizations {
   String get settingsModelProviderTypeLocalModel => 'Modèle local';
 
   @override
+  String get settingsModelProviderTypeLocalGateway => 'Passerelle locale';
+
+  @override
+  String get settingsModelLocalGatewayHint =>
+      'Créez ce fournisseur sur l’appareil exécutant Magpie, CC Switch ou une autre passerelle. Les adresses locales désignent cet appareil ; les autres appareils y accèdent par route. Compatible avec /v1/chat/completions, /v1/responses et /v1/messages. Gardez cet appareil en ligne et autorisez l’exécution à distance.';
+
+  @override
   String localModelsLoadFailed(Object error) {
     return 'Échec du chargement de l\'état des modèles locaux : $error';
   }
@@ -2168,6 +2187,43 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get settingsModelAddModelShort => 'Ajouter';
+
+  @override
+  String get settingsModelSyncModels => 'Synchroniser les modèles';
+
+  @override
+  String get settingsModelSyncingModels => 'Synchronisation...';
+
+  @override
+  String get settingsModelSyncModelsTooltip =>
+      'Récupérer la dernière liste de modèles et supprimer les anciens modèles non personnalisés';
+
+  @override
+  String get settingsModelCustomBadge => 'Personnalisé';
+
+  @override
+  String settingsModelSyncUpToDate(int total) {
+    return 'La liste des modèles est à jour ($total au total)';
+  }
+
+  @override
+  String settingsModelSyncSummary(int added, int removed, int keptCustom) {
+    return 'Synchronisé : +$added, -$removed, $keptCustom personnalisés conservés';
+  }
+
+  @override
+  String settingsModelSyncSwitchedBinding(
+    int added,
+    int removed,
+    String target,
+  ) {
+    return 'Synchronisé (+$added, -$removed) ; le modèle lié supprimé a été basculé vers $target';
+  }
+
+  @override
+  String settingsModelSyncMissingBinding(int removed) {
+    return 'Synchronisé (-$removed) ; le modèle lié a été supprimé et aucun modèle ne reste';
+  }
 
   @override
   String get settingsModelAvailableFetchedOnly => 'Récupérés uniquement';
@@ -3712,6 +3768,17 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get settingsAppearanceMessageDensityCompact => 'Compact';
+
+  @override
+  String get settingsAppearanceChatHorizontalPadding =>
+      'Chat content side padding';
+
+  @override
+  String get settingsAppearanceChatHorizontalPaddingEdge => 'Edge to edge';
+
+  @override
+  String get settingsAppearanceChatHorizontalPaddingDetail =>
+      'Smaller values widen the transcript; bubble and composer insets are unaffected.';
 
   @override
   String get settingsAppearanceWideLayout =>
@@ -7585,4 +7652,323 @@ class AppLocalizationsFr extends AppLocalizations {
     );
     return '$_temp0';
   }
+
+  @override
+  String get settingsUsageTabAnalytics => 'Utilisation et vitesse';
+
+  @override
+  String get settingsUsageTabQuotas => 'Soldes et quotas';
+
+  @override
+  String get settingsUsageDeviceScopeAll => 'Tous les appareils';
+
+  @override
+  String get settingsUsageDeviceScopeLocal => 'Cet appareil';
+
+  @override
+  String get settingsUsageExportJson => 'Copier le rapport JSON';
+
+  @override
+  String get settingsUsageExportCsv => 'Copier le tableau CSV';
+
+  @override
+  String get settingsUsageExportCopied =>
+      'Rapport copié dans le presse-papiers';
+
+  @override
+  String get settingsUsageResetScopeTitle => 'Réinitialiser les statistiques';
+
+  @override
+  String get settingsUsageResetLocalOnly => 'Cet appareil uniquement';
+
+  @override
+  String get settingsUsageResetAllSpace => 'Tous les appareils du Space';
+
+  @override
+  String get settingsUsageResetScopeWarning =>
+      'La réinitialisation locale conserve les données des autres appareils ; la réinitialisation du Space efface l\'historique sur tous les appareils.';
+
+  @override
+  String get settingsUsageKpiThroughput => 'Vitesse moyenne';
+
+  @override
+  String settingsUsageKpiTtftMedian(String ttft) {
+    return 'TTFT médian : $ttft';
+  }
+
+  @override
+  String settingsUsageKpiSpeedSamples(int count) {
+    return '$count requêtes en flux';
+  }
+
+  @override
+  String get settingsUsageKpiReasoning => 'Raisonnement';
+
+  @override
+  String get settingsUsageKpiCacheWrite => 'Écriture cache';
+
+  @override
+  String settingsUsageKpiSuccessRate(int ok, int err) {
+    return '$ok ok · $err échec/annul.';
+  }
+
+  @override
+  String get settingsUsageTimelineSpeedTitle => 'Débit de génération (tok/s)';
+
+  @override
+  String settingsUsageTimelineSpeedDetail(String speed, String ttft) {
+    return 'Flux $speed tok/s · TTFT $ttft';
+  }
+
+  @override
+  String get settingsUsageTimelineNoSpeedData =>
+      'Aucune requête streaming ≥100 ms';
+
+  @override
+  String get settingsUsageAttrModels => 'Modèles';
+
+  @override
+  String get settingsUsageAttrSources => 'Fonction et source';
+
+  @override
+  String get settingsUsageAttrDevices => 'Appareils Space';
+
+  @override
+  String get settingsUsageAttrLogs => 'Journal des requêtes';
+
+  @override
+  String get settingsUsageColSpeed => 'Vitesse';
+
+  @override
+  String get settingsUsageColTtft => 'TTFT';
+
+  @override
+  String get settingsUsageColSpend => 'Coût est.';
+
+  @override
+  String get settingsUsageColShare => 'Part';
+
+  @override
+  String get settingsUsageDeviceUnknown => 'Appareil local / hérité';
+
+  @override
+  String get settingsUsageLogFilterRecent => 'Récents';
+
+  @override
+  String get settingsUsageLogFilterTopTokens => 'Pics de tokens';
+
+  @override
+  String get settingsUsageLogFilterIssues => 'Échecs / Annulés';
+
+  @override
+  String get settingsUsageLogFilterReasoning => 'Raisonnement';
+
+  @override
+  String get settingsUsageStatusCompleted => 'Terminé';
+
+  @override
+  String get settingsUsageStatusCancelled => 'Annulé';
+
+  @override
+  String get settingsUsageStatusFailed => 'Échoué';
+
+  @override
+  String get settingsUsageRequestDetailTitle => 'Télémétrie de requête';
+
+  @override
+  String settingsUsageLatencyBreakdown(String wait, String stream) {
+    return 'Attente $wait · Flux $stream';
+  }
+
+  @override
+  String get settingsQuotaProbeAll => 'Tout actualiser';
+
+  @override
+  String get settingsQuotaProbeSingle => 'Actualiser';
+
+  @override
+  String get settingsQuotaProbeViaNode => 'Interroger via un nœud Space';
+
+  @override
+  String get settingsQuotaFilterAll => 'Tous';
+
+  @override
+  String get settingsQuotaFilterBalance => 'Soldes';
+
+  @override
+  String get settingsQuotaFilterSubscription => 'Forfaits';
+
+  @override
+  String get settingsQuotaFilterLocal => 'Local';
+
+  @override
+  String get settingsQuotaFilterBudget => 'Budgets & Console';
+
+  @override
+  String get settingsQuotaRemainingLabel => 'Solde restant';
+
+  @override
+  String get settingsQuotaCashLabel => 'Payant';
+
+  @override
+  String get settingsQuotaGrantedLabel => 'Offert';
+
+  @override
+  String get settingsQuotaUsedLabel => 'Utilisé';
+
+  @override
+  String get settingsQuotaDailyUsedLabel => 'Aujourd\'hui';
+
+  @override
+  String get settingsQuotaMonthlyUsedLabel => 'Ce mois';
+
+  @override
+  String settingsQuotaKeyPoolCount(int count) {
+    return '$count clés pool';
+  }
+
+  @override
+  String get settingsQuotaStatusOk => 'Actif';
+
+  @override
+  String get settingsQuotaStatusUnauthorized => 'Non autorisé';
+
+  @override
+  String get settingsQuotaStatusError => 'Erreur';
+
+  @override
+  String get settingsQuotaStatusStale => 'Non interrogé';
+
+  @override
+  String get settingsQuotaStatusUnsupported => 'Pas d\'API solde';
+
+  @override
+  String settingsQuotaProbedBy(String device, String time) {
+    return 'Interrogé par $device · $time';
+  }
+
+  @override
+  String get settingsQuotaOpenConsole => 'Console';
+
+  @override
+  String get settingsQuotaProtocolConfig => 'Protocole';
+
+  @override
+  String get settingsQuotaSetBudget => 'Plafond mensuel';
+
+  @override
+  String get settingsQuotaEditBudget => 'Modifier le budget';
+
+  @override
+  String settingsQuotaBudgetProgress(String spent, String limit) {
+    return '$spent / $limit ce cycle';
+  }
+
+  @override
+  String get settingsQuotaBudgetExceeded => 'Seuil d\'alerte budget atteint';
+
+  @override
+  String get settingsQuotaDialogBudgetLimit => 'Plafond mensuel';
+
+  @override
+  String get settingsQuotaDialogResetDay => 'Jour de réinitialisation (1-28)';
+
+  @override
+  String get settingsQuotaDialogAlertPct => 'Seuil d\'alerte (%)';
+
+  @override
+  String get settingsQuotaDialogProtocolLabel => 'Protocole de requête';
+
+  @override
+  String get settingsQuotaDialogCustomPath => 'Chemin ou URL personnalisé';
+
+  @override
+  String get settingsQuotaDialogAmountJsonPath => 'Chemin JSON montant';
+
+  @override
+  String get settingsQuotaDialogCurrencyJsonPath => 'Chemin JSON devise';
+
+  @override
+  String get settingsQuotaDialogClear => 'Supprimer';
+
+  @override
+  String get settingsQuotaEmptyProviders => 'Aucun fournisseur configuré';
+
+  @override
+  String get settingsQuotaLocalZeroCost => 'Inférence locale · Zéro frais API';
+
+  @override
+  String get settingsUsageColStatus => 'Statut';
+
+  @override
+  String get settingsUsageColTime => 'Heure';
+
+  @override
+  String get settingsUsageModeStream => 'Flux';
+
+  @override
+  String get settingsUsageModeNonStream => 'Standard';
+
+  @override
+  String get settingsUsageTopModelsTitle => 'Répartition modèles et tokens';
+
+  @override
+  String get settingsUsageTokenMixLabel => 'Composition des tokens';
+
+  @override
+  String get settingsUsageDirectInputLabel => 'Entrée directe';
+
+  @override
+  String get settingsUsageNoModelsInRange =>
+      'Aucun trafic modèle sur cette période';
+
+  @override
+  String get settingsUsageKpiNoPriceHint => 'Tarifs modèle non trouvés';
+
+  @override
+  String get settingsUsageKpiStreamHint => 'Requiert flux ≥100 ms';
+
+  @override
+  String settingsUsageHeatmapWeeks(int weeks) {
+    return 'Activité sur $weeks sem.';
+  }
+
+  @override
+  String get settingsQuotaSummaryTotalRemaining => 'Solde suivi';
+
+  @override
+  String settingsQuotaSummaryProviders(int ready, int total) {
+    return '$ready actifs · $total configurés';
+  }
+
+  @override
+  String settingsQuotaSummaryAlertCount(int count) {
+    return '$count alertes';
+  }
+
+  @override
+  String settingsUsageHeatmapSubtitle(int weeks) {
+    return 'Activité quotidienne sur les $weeks dernières semaines';
+  }
+
+  @override
+  String get settingsUsageHeatmapMetricTokens => 'Tokens';
+
+  @override
+  String get settingsUsageHeatmapMetricRequests => 'Requêtes';
+
+  @override
+  String get settingsUsageHeatmapMetricCost => 'Coût';
+
+  @override
+  String get settingsUsageWeekdayMon => 'Lun';
+
+  @override
+  String get settingsUsageWeekdayWed => 'Mer';
+
+  @override
+  String get settingsUsageWeekdayFri => 'Ven';
+
+  @override
+  String get settingsUsageWeekdaySun => 'Dim';
 }

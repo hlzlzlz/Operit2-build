@@ -430,6 +430,7 @@ impl CoreNodeRouter {
     async fn routeNodeId(&self, route: GeneratedCoreRoute) -> Result<String, CoreLinkError> {
         match route {
             GeneratedCoreRoute::Local => Ok(self.localNodeId.clone()),
+            GeneratedCoreRoute::Node { nodeId } => Ok(nodeId),
             GeneratedCoreRoute::Binding { key, .. } => self.bindingRouteNodeId(&key),
         }
     }
@@ -991,20 +992,16 @@ impl CoreNodeRouter {
                 )
             }
         };
-        let bindingKey = match route.bindingKey(&request.args) {
-            Ok(value) => value,
+        let address = match crate::generated_core_call_route(&request) {
+            Ok(address) => address,
             Err(error) => return CoreCallResponse::err(requestId, error),
         };
-        if let Err(error) = self.prepareCreationBinding(&route, &bindingKey, &originNodeId).await {
-            return CoreCallResponse::err(requestId, error);
+        if let GeneratedCoreRoute::Binding { key, .. } = &address {
+            if let Err(error) = self.prepareCreationBinding(&route, key, &originNodeId).await {
+                return CoreCallResponse::err(requestId, error);
+            }
         }
-        let targetNodeId = match self
-            .routeNodeId(GeneratedCoreRoute::Binding {
-                scope: 0,
-                key: bindingKey,
-            })
-            .await
-        {
+        let targetNodeId = match self.routeNodeId(address).await {
             Ok(value) => value,
             Err(error) => return CoreCallResponse::err(requestId, error),
         };
@@ -2159,6 +2156,13 @@ impl CoreLinkSharedClient for CoreNodeRouter {
             Ok(route) => route,
             Err(error) => return CoreCallResponse::err(requestId, error),
         };
+        if matches!(&generatedRoute, GeneratedCoreRoute::Node { .. }) {
+            let route = crate::generated_space_route_for_method(&request.methodName)
+                .expect("generated node route has Space metadata");
+            let mut request = request;
+            request.target = route.routeId.to_string();
+            return self.callSpaceWithOrigin(request, self.localNodeId.clone()).await;
+        }
         let route = generatedRoute;
         if let GeneratedCoreRoute::Binding { key, .. } = &route {
             operit_util::AppLogger::AppLogger::trace(
@@ -2365,6 +2369,7 @@ impl CoreRouteRuntime for CoreNodeRouter {
         };
         match route {
             GeneratedCoreRoute::Local => Ok(false),
+            GeneratedCoreRoute::Node { .. } => Ok(true),
             GeneratedCoreRoute::Binding { key, .. } => {
                 let targetNodeId = match self.bindingStore.bindingNodeId(&key) {
                     Ok(targetNodeId) => targetNodeId,
@@ -2397,6 +2402,7 @@ impl CoreRouteRuntime for CoreNodeRouter {
         };
         match route {
             GeneratedCoreRoute::Local => Ok(false),
+            GeneratedCoreRoute::Node { .. } => Ok(true),
             GeneratedCoreRoute::Binding { key, .. } => {
                 let targetNodeId = match self.bindingStore.bindingNodeId(&key) {
                     Ok(targetNodeId) => targetNodeId,
@@ -2431,6 +2437,7 @@ impl CoreRouteRuntime for CoreNodeRouter {
         };
         match route {
             GeneratedCoreRoute::Local => Ok(false),
+            GeneratedCoreRoute::Node { .. } => Ok(false),
             GeneratedCoreRoute::Binding { key, .. } => {
                 let targetNodeId = match self.bindingStore.bindingNodeId(&key) {
                     Ok(targetNodeId) => targetNodeId,
@@ -2507,6 +2514,7 @@ impl CoreRouteRuntime for CoreNodeRouter {
                         Some(localStream),
                     )
                 }
+                GeneratedCoreRoute::Node { nodeId } => router.watchNodeSpaceWithOrigin(nodeId, request, router.localNodeId.clone()).await,
                 GeneratedCoreRoute::Local => Ok(localStream),
             }
         })
@@ -4494,10 +4502,7 @@ mod tests {
                 return CoreCallResponse::ok(request.payload.requestId, response);
             }
             assert_eq!(request.routeKind, RoutedCoreRequestKind::SpaceRoute);
-            assert_eq!(
-                request.payload.target,
-                CORE_INTERNAL_TARGET
-            );
+            assert!(crate::generated_space_call_route(&request.payload).is_some());
             self.callCount.fetch_add(1, Ordering::SeqCst);
             self.methods
                 .lock()
@@ -5244,6 +5249,30 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().is_none());
         assert_eq!(opens.load(Ordering::SeqCst), 2, "normal completion must not reopen the producer");
         peer.close();
+    }
+
+    /// Sends an explicitly targeted service call through the ordinary Space route carrier.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_addressed_service_uses_space_route_without_binding_lookup() {
+        let _guard = routeTestGlobalLock().lock().await;
+        installTestRuntimeScheduler();
+        let router = testCoreNodeRouter("quota-client", "quota-target", "unused-chat");
+        let target = TestRoutedCallEndpoint::new();
+        let link = installTestPeer(&router, "quota-target".into(), target.clone()).unwrap();
+        let args = CoreValue::Map(BTreeMap::from([
+            ("providerId".into(), CoreValue::String("provider-1".into())),
+            ("targetNodeId".into(), CoreValue::String("quota-target".into())),
+        ]));
+        // A proxy address is translated to a stable annotated route before crossing nodes.
+        let result = CoreLinkSharedClient::call(&router, CoreCallRequest::new("quota-direct", "local/proxy-id",
+            "probeProviderQuota", args.clone())).await;
+        assert!(result.result.is_ok(), "{:?}", result.result);
+        let route = crate::generated_space_route_for_method("probeProviderQuota").unwrap();
+        let result = router.callSpace(CoreCallRequest::new("quota-space", route.routeId,
+            route.methodName, args)).await;
+        assert!(result.result.is_ok(), "{:?}", result.result);
+        assert_eq!(target.methodNames(), vec!["probeProviderQuota", "probeProviderQuota"]);
+        link.close();
     }
 
     /// Verifies an async annotation wrapper routes public Rust calls to the selected remote Core.

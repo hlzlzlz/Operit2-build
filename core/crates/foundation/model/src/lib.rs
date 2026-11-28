@@ -30,6 +30,8 @@ pub mod ChatMessagePresentation;
 pub mod ChatMessageTimestampAllocator;
 #[path = "ChatTurnOptions.rs"]
 pub mod ChatTurnOptions;
+#[path = "ContextWindowBreakdown.rs"]
+pub mod ContextWindowBreakdown;
 #[path = "CustomEmoji.rs"]
 pub mod CustomEmoji;
 #[path = "DragonBones.rs"]
@@ -52,6 +54,8 @@ pub mod MessageVariantEntity;
 pub mod ModelCatalog;
 #[path = "ModelConfigData.rs"]
 pub mod ModelConfigData;
+#[path = "ProviderQuota.rs"]
+pub mod ProviderQuota;
 #[path = "ModelParameter.rs"]
 pub mod ModelParameter;
 #[path = "ModelThinking.rs"]
@@ -105,6 +109,7 @@ pub use ChatMessageDisplayMode::*;
 pub use ChatMessageLocatorPreview::*;
 pub use ChatMessageTimestampAllocator::*;
 pub use ChatTurnOptions::*;
+pub use ContextWindowBreakdown::*;
 pub use CustomEmoji::*;
 pub use DragonBones::*;
 pub use FunctionType::*;
@@ -116,6 +121,7 @@ pub use MessagePartEntity::*;
 pub use MessageVariantEntity::*;
 pub use ModelCatalog::*;
 pub use ModelConfigData::*;
+pub use ProviderQuota::*;
 pub use ModelParameter::*;
 pub use OpenAIModels::*;
 pub use OperitChatArchive::*;

@@ -20,7 +20,9 @@ use crate::services::core::MessageCoordinationDelegate::{MessageCoordinationDele
 use crate::services::RuntimeHostInteractionService::{
     publishOwnerAppNotification, RuntimeHostInteractionAppNotificationPayload,
 };
-use crate::ui::features::chat::webview::workspace::WorkspaceBackupManager::WorkspaceBackupManager;
+use crate::ui::features::chat::webview::workspace::WorkspaceBackupManager::{
+    WorkspaceBackupManager, WorkspaceToolHookDropGuard, WorkspaceToolHookRegistration,
+};
 use operit_vfs::VisualFileSystem::VisualFileSystem;
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::HostRuntimeTaskSchedulerHost;
@@ -42,10 +44,11 @@ use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::PromptTurn;
 use operit_providers::chat::llmprovider::AIService::SharedAiResponseStream;
 use operit_providers::chat::EnhancedAIService::{
-    ChatGuidanceInbox, EnhancedAIService, SendMessageCallbacks,
+    ChatGuidanceInbox, EnhancedAIService, MessageCancellationToken, SendMessageCallbacks,
 };
 use operit_providers::chat::TurnTokenUsage::{TurnTokenSnapshot, TurnTokenUsage};
 use operit_providers::runtime_support::ChatConfigurationResult;
+use operit_tools::tools::AIToolHandler::AIToolHandler;
 use operit_plugin_sdk::js_sdk::results::{ChatCommittedMessage, JsOptional, MessageSendOutcome, MessageSendResultData, MessageSendStatus};
 use tokio::sync::oneshot;
 use operit_store::PreferencesDataStore::{mutableStateFlow, MutableStateFlow, StateFlow};
@@ -341,6 +344,9 @@ pub struct ChatRuntime {
     pub tokenUsage: TurnTokenUsage,
     pub sendJob: Option<String>,
     pub responseStream: Option<SharedAiResponseStream>,
+    pub enhancedAiService: Option<EnhancedAIService>,
+    pub cancellationToken: MessageCancellationToken,
+    workspaceToolHook: Option<Arc<WorkspaceToolHookRegistration<AIToolHandler>>>,
     pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub streamCollectionJob: Option<String>,
     pub stateCollectionJob: Option<String>,
@@ -363,6 +369,9 @@ impl ChatRuntime {
             tokenUsage: TurnTokenUsage::default(),
             sendJob: None,
             responseStream: None,
+            enhancedAiService: None,
+            cancellationToken: MessageCancellationToken::default(),
+            workspaceToolHook: None,
             guidanceInbox: None,
             streamCollectionJob: None,
             stateCollectionJob: None,
@@ -379,17 +388,18 @@ impl ChatRuntime {
     pub(crate) fn reserveCancellation(
         &mut self,
         expectedTurnId: Option<u64>,
-        isLoading: bool,
+        isProcessing: bool,
     ) -> Result<Option<(u64, u64)>, String> {
         if expectedTurnId.is_some_and(|expected| self.activeTurnId != expected) {
             return Err("Work generation is no longer active".to_string());
         }
-        if !isLoading || self.isCancelling {
+        if !isProcessing || self.isCancelling {
             if expectedTurnId.is_some() { return Err("Work execution is no longer running".to_string()); }
             return Ok(None);
         }
         let cancelledTurnId = self.activeTurnId;
         self.isCancelling = true;
+        self.cancellationToken.cancel();
         if let Some(inbox) = &self.guidanceInbox {
             inbox.closeAndClear();
         }
@@ -590,14 +600,19 @@ struct ChatSummaryTasks {
 impl ChatSummaryTasks {
     /// Rejects overlapping summaries instead of replacing their cancellation handles.
     fn register(&self, chatId: String, task: ChatSummaryTask) -> Result<(), String> {
+        self.registerOrGet(chatId.clone(), task).map_err(|_| format!(
+            "Conversation summary already running for chat: {chatId}"
+        ))
+    }
+
+    /// Atomically returns the existing owner when another summary already holds the chat.
+    fn registerOrGet(&self, chatId: String, task: ChatSummaryTask) -> Result<(), ChatSummaryTask> {
         let mut tasks = self
             .tasks
             .lock()
             .expect("summary task registry mutex poisoned");
-        if tasks.contains_key(&chatId) {
-            return Err(format!(
-                "Conversation summary already running for chat: {chatId}"
-            ));
+        if let Some(existing) = tasks.get(&chatId) {
+            return Err(existing.clone());
         }
         tasks.insert(chatId, task);
         Ok(())
@@ -942,6 +957,7 @@ impl MessageProcessingDelegate {
                 .checked_add(1)
                 .expect("chat turn id must not overflow");
             runtime.isCancelling = false;
+            runtime.cancellationToken = MessageCancellationToken::default();
             runtime.executionLease = Some(executionLease);
             runtime.currentTurnOptions = turnOptions;
             runtime.requestSentAt = messageTimingNow().startedAtMs as i64;
@@ -1059,14 +1075,15 @@ impl MessageProcessingDelegate {
     /// Clears one turn's runtime state without touching a newer turn for the chat.
     #[allow(non_snake_case)]
     fn cleanupRuntimeAfterTurn(&mut self, chatId: String, turnId: u64) -> bool {
-        let cleaned = self
-            .withExistingRuntime(Some(chatId.clone()), |runtime| {
+        self
+            .withExistingRuntime(Some(chatId), |runtime| {
                 if runtime.activeTurnId != turnId || runtime.isCancelling {
                     return false;
                 }
                 if let Some(inbox) = &runtime.guidanceInbox {
                     inbox.closeAndClear();
                 }
+                if let Some(registration) = runtime.workspaceToolHook.take() { registration.close(); }
                 if let Some(lease) = runtime.executionLease.take() {
                     if !runtime.currentTurnOptions.deferSequenceCompletion {
                         lease.release().expect("Execution lease release must succeed");
@@ -1078,11 +1095,7 @@ impl MessageProcessingDelegate {
                 runtime.activeStreamingAiMessage = None;
                 true
             })
-            .unwrap_or(false);
-        if cleaned {
-            self.clearCurrentTurnToolInvocationCount(chatId);
-        }
-        cleaned
+            .unwrap_or(false)
     }
 
     /// Publishes terminal state only while the originating turn remains current.
@@ -1137,7 +1150,7 @@ impl MessageProcessingDelegate {
             .flatten()
     }
 
-    /// Initializes tool invocation accounting for a chat state that is about to be published.
+    /// Initializes accounting before publishing chat state; entries live as long as that state.
     #[allow(non_snake_case)]
     fn initializeCurrentTurnToolInvocationCount(&mut self, chatId: &str) {
         self.currentTurnToolInvocationCountByChatIdFlow
@@ -1294,6 +1307,15 @@ impl MessageProcessingDelegate {
         self.summaryTasksByChatId.register(chatId, task)
     }
 
+    /// Reserves the chat or returns the already registered summary atomically.
+    pub(crate) fn registerSummaryTaskOrGet(
+        &self,
+        chatId: String,
+        task: ChatSummaryTask,
+    ) -> Result<(), ChatSummaryTask> {
+        self.summaryTasksByChatId.registerOrGet(chatId, task)
+    }
+
     /// Reads the actual summary operation shared by every clone serving this chat.
     pub(crate) fn summaryTaskForChat(&self, chatId: &str) -> Option<ChatSummaryTask> {
         self.summaryTasksByChatId.get(chatId)
@@ -1401,6 +1423,7 @@ impl MessageProcessingDelegate {
             if let Some(inbox) = &runtime.guidanceInbox {
                 inbox.closeAndClear();
             }
+            if let Some(registration) = runtime.workspaceToolHook.take() { registration.close(); }
             if let Some(lease) = runtime.executionLease.take() {
                 if !runtime.currentTurnOptions.deferSequenceCompletion {
                     lease.release().expect("Terminal execution lease release must succeed");
@@ -1408,6 +1431,7 @@ impl MessageProcessingDelegate {
             }
             runtime.sendJob = None;
             runtime.responseStream = None;
+            runtime.enhancedAiService = None;
             runtime.streamCollectionJob = None;
             runtime.stateCollectionJob = None;
             runtime.activeStreamingAiMessage = None;
@@ -1636,8 +1660,9 @@ impl MessageProcessingDelegate {
     ) -> impl std::future::Future<Output = Result<Option<ChatMessage>, String>> + 'static {
         if expectedTurnId.is_none() { self.cancelSummaryTasks(Some(&chatId)); }
         let cancellation = self.withExistingRuntime(Some(chatId.clone()), |runtime| {
-            runtime.reserveCancellation(expectedTurnId, self.isChatLoading(chatId.clone())).map(|reservation|
-                reservation.map(|(cancelled, cancelling)| (cancelled, cancelling, runtime.responseStream.clone())))
+            runtime.reserveCancellation(expectedTurnId, self.isChatProcessing(&chatId)).map(|reservation|
+                reservation.map(|(cancelled, cancelling)| (cancelled, cancelling,
+                    runtime.responseStream.clone(), runtime.enhancedAiService.take(), runtime.workspaceToolHook.take())))
         });
         let mut delegate = self.clone_for_core();
         async move {
@@ -1645,12 +1670,14 @@ impl MessageProcessingDelegate {
                 if expectedTurnId.is_some() { return Err("Work runtime no longer exists".to_string()); }
                 return Ok(None);
             };
-            let Some((cancelledTurnId, cancellationTurnId, responseStream)) = reservation? else { return Ok(None); };
+            let Some((cancelledTurnId, cancellationTurnId, responseStream, service, workspaceToolHook)) = reservation? else { return Ok(None); };
             if expectedTurnId.is_some() { delegate.cancelSummaryTasks(Some(&chatId)); }
-            delegate.clearCurrentTurnToolInvocationCount(chatId.clone());
-            // Cancel the producer first. Closing the stream earlier lets its cleanup task
-            // remove the active service before AIMessageManager can invalidate execution.
-            let usageResult = AIMessageManager::cancelOperation(chatId.clone()).await;
+            // The turn owns cancellation even before a send registers or after its stream closes.
+            let usageResult = match service {
+                Some(mut service) => service.cancelConversation().await,
+                None => Ok(()),
+            };
+            if let Some(registration) = workspaceToolHook { registration.close(); }
             let ownsCancellation = delegate.withExistingRuntime(Some(chatId.clone()), |runtime| {
                 runtime.activeTurnId == cancellationTurnId && runtime.isCancelling
             }).unwrap_or(false);
@@ -1712,7 +1739,14 @@ impl MessageProcessingDelegate {
     /// Cancels an active message turn before destructive history mutation.
     #[allow(non_snake_case)]
     pub async fn cancelMessageForDestructiveMutation(&mut self, chatId: String) -> Result<(), String> {
-        self.cancelMessageInternal(chatId, false).await.map(|_| ())
+        let processing = self.clone_for_core();
+        self.cancelMessageInternalForTurn(chatId.clone(), false, None, move |result| {
+            match &result {
+                Ok(_) => processing.completeCancelledTurnReceipt(&chatId, None),
+                Err(error) => processing.failTurnReceipt(&chatId, error.clone()),
+            }
+            result
+        }).await.map(|_| ())
     }
 
     /// Returns the observable set of chat ids with active streaming turns.
@@ -1810,39 +1844,23 @@ impl MessageProcessingDelegate {
         self.speakMessageHandler = Some(handler);
     }
 
-    /// Resets current-turn tool invocation count for one chat.
+    /// Starts a fresh turn's accounting without removing another chat's retained count.
     #[allow(non_snake_case)]
     pub fn resetCurrentTurnToolInvocationCount(&mut self, chatId: String) {
-        let mut counts = self.currentTurnToolInvocationCountByChatIdFlow.value();
-        counts.insert(chatId, 0);
-        self.currentTurnToolInvocationCountByChatId = counts.clone();
         self.currentTurnToolInvocationCountByChatIdFlow
-            .set_value(counts);
+            .update(|counts| { counts.insert(chatId.clone(), 0); });
+        self.currentTurnToolInvocationCountByChatId = self.currentTurnToolInvocationCountByChatIdFlow.value();
     }
 
     /// Increments current-turn tool invocation count for one chat.
     #[allow(non_snake_case)]
     pub fn incrementCurrentTurnToolInvocationCount(&mut self, chatId: String) {
-        let mut counts = self.currentTurnToolInvocationCountByChatIdFlow.value();
-        let value = counts
-            .get(&chatId)
-            .copied()
-            .expect("tool invocation count must be initialized before incrementing")
-            + 1;
-        counts.insert(chatId, value);
-        self.currentTurnToolInvocationCountByChatId = counts.clone();
         self.currentTurnToolInvocationCountByChatIdFlow
-            .set_value(counts);
-    }
-
-    /// Clears current-turn tool invocation count for one chat.
-    #[allow(non_snake_case)]
-    pub fn clearCurrentTurnToolInvocationCount(&mut self, chatId: String) {
-        let mut counts = self.currentTurnToolInvocationCountByChatIdFlow.value();
-        counts.remove(&chatId);
-        self.currentTurnToolInvocationCountByChatId = counts.clone();
-        self.currentTurnToolInvocationCountByChatIdFlow
-            .set_value(counts);
+            .update(|counts| {
+                *counts.get_mut(&chatId)
+                    .expect("tool invocation count must be initialized before incrementing") += 1;
+            });
+        self.currentTurnToolInvocationCountByChatId = self.currentTurnToolInvocationCountByChatIdFlow.value();
     }
 
     /// Sends a user message, streams the AI response, persists history, and updates UI state.
@@ -1895,7 +1913,8 @@ impl MessageProcessingDelegate {
             .withExistingRuntime(Some(chatId.clone()), |runtime| runtime.guidanceInbox.clone())
             .flatten();
         let (receiptSender, receiptReceiver) = oneshot::channel();
-        self.withRuntime(Some(chatId.clone()), |runtime| {
+        let cancellationToken = self.withRuntime(Some(chatId.clone()), |runtime| {
+            runtime.enhancedAiService = Some(request.enhancedAiService.clone());
             runtime.receipt = Some(Arc::new(Mutex::new(ChatTurnReceiptState {
                 turnId, nativeExecutionId: request.turnOptions.nativeExecutionId.clone(), sender: Some(receiptSender),
                 result: MessageSendResultData {
@@ -1912,6 +1931,7 @@ impl MessageProcessingDelegate {
                     },
                 },
             })));
+            runtime.cancellationToken.clone()
         });
         let mut workGuard = self.startChatExecution(chatId.clone(), workTitle);
 
@@ -2001,9 +2021,8 @@ impl MessageProcessingDelegate {
         ).await.map_err(operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed)?;
         finalMessageContent = userMessage.displayText();
         }
-        let mut workspaceToolHookSession = None;
         let mut workspaceToolHookHandler = request.enhancedAiService.tool_handler.clone();
-        if let Some(workspacePath) = request
+        let workspaceToolHookSession = if let Some(workspacePath) = request
             .workspacePath
             .clone()
             .filter(|path| !path.trim().is_empty())
@@ -2016,7 +2035,20 @@ impl MessageProcessingDelegate {
                         Some(chatId.clone()),
                     );
             workspaceToolHookHandler.addToolHook(session.clone());
-            workspaceToolHookSession = Some(session);
+            Some(session)
+        } else {
+            None
+        };
+        let workspaceToolHookCleanupGuard = WorkspaceToolHookDropGuard::new(
+            workspaceToolHookSession, workspaceToolHookHandler,
+        );
+        let registered = self.withExistingRuntime(Some(chatId.clone()), |runtime| {
+            if runtime.activeTurnId != turnId || runtime.isCancelling { return false; }
+            runtime.workspaceToolHook = Some(workspaceToolHookCleanupGuard.registration.clone());
+            true
+        }).unwrap_or(false);
+        if !registered {
+            return Err(operit_providers::chat::llmprovider::AIService::AiServiceError::RequestCancelled);
         }
         if shouldAddUserMessageToChat {
             ChainLogger::verbose(
@@ -2080,6 +2112,14 @@ impl MessageProcessingDelegate {
 
         let participantName = configuration.profile.name.clone();
         let requestMessageContent = finalMessageContent;
+        let summaryContextBase = {
+            let mut source = request.chatHistory.clone();
+            if shouldAddUserMessageToChat && userMessage.displayMode != ChatMessageDisplayMode::HIDDEN_PLACEHOLDER {
+                source.push(userMessage.clone());
+            }
+            let source = AIMessageManager::getMemoryFromMessages(source, &configuration)?;
+            operit_providers::chat::enhance::ConversationContext::sourceFingerprint(&source)
+        };
         let assistantMessageTimestamp = ChatMessageTimestampAllocator::next();
         let mut aiMessage = ChatMessage {
             sender: "ai".to_string(), timestamp: assistantMessageTimestamp,
@@ -2097,6 +2137,7 @@ impl MessageProcessingDelegate {
             let displayProgram = ToolPkgMessageTransformBridge::prepareDisplay(&chatId, &aiMessage, 0, false).await
                 .map_err(operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed)?;
             let stream = AIMessageManager::sendMessage(AIMessageSendRequest {
+            cancellationToken,
             chatConfiguration: configuration.clone(),
             enhancedAiService: request.enhancedAiService,
             guidanceInbox: guidanceInbox.clone(),
@@ -2140,10 +2181,6 @@ impl MessageProcessingDelegate {
                     "receive.stream.create.error",
                     &[("chatId", chatId.clone()), ("error", error.to_string())],
                 );
-                if let Some(session) = workspaceToolHookSession.as_ref() {
-                    workspaceToolHookHandler.removeToolHook(session.hookId());
-                    session.close();
-                }
                 if self.cleanupRuntimeAfterTurn(chatId.clone(), turnId) {
                     self.finishChatExecutionForTurn(
                         chatId.clone(),
@@ -2268,8 +2305,6 @@ impl MessageProcessingDelegate {
             .withRuntime(Some(chatId.clone()), |runtime| {
                 (runtime.requestSentAt, runtime.requestStartElapsed)
             });
-        let workerWorkspaceToolHookSession = Arc::new(Mutex::new(workspaceToolHookSession.clone()));
-        let workerWorkspaceToolHookHandler = Arc::new(Mutex::new(workspaceToolHookHandler.clone()));
         if userMessageAdded {
             userMessage.sentAt = workerRequestSentAt;
             request
@@ -2304,8 +2339,6 @@ impl MessageProcessingDelegate {
         let completionRevisionTracker = workerRevisionTracker.clone();
         let completionPartStream = workerPartStream.clone();
         let completionMessageProcessingDelegate = workerMessageProcessingDelegate.clone();
-        let completionWorkspaceToolHookSession = workerWorkspaceToolHookSession.clone();
-        let completionWorkspaceToolHookHandler = workerWorkspaceToolHookHandler.clone();
         let completionFirstResponseElapsed = workerFirstResponseElapsed.clone();
         let completionResponseStream = workerResponseStream.clone();
         let persistChatId = completionChatId.clone();
@@ -2352,6 +2385,7 @@ impl MessageProcessingDelegate {
                 "message-response-collection",
                 Box::new(move || {
                     Box::pin(async move {
+                        let workspaceToolHookCleanupGuard = workspaceToolHookCleanupGuard;
                         responseItems
                             .collect_ordered(&mut move |item| {
                                 let chunk = match item {
@@ -2428,17 +2462,7 @@ impl MessageProcessingDelegate {
                                 persistStreamingSnapshot(&snapshot);
                             })
                             .await;
-                        let workspaceToolHookSession = completionWorkspaceToolHookSession
-                            .lock()
-                            .expect("workspace tool hook session mutex poisoned")
-                            .take();
-                        if let Some(session) = workspaceToolHookSession.as_ref() {
-                            completionWorkspaceToolHookHandler
-                                .lock()
-                                .expect("workspace tool hook handler mutex poisoned")
-                                .removeToolHook(session.hookId());
-                            session.close();
-                        }
+                        workspaceToolHookCleanupGuard.registration.close();
                         if !completionMessageProcessingDelegate
                             .lock()
                             .expect("worker message processing delegate mutex poisoned")
@@ -2637,6 +2661,25 @@ impl MessageProcessingDelegate {
                             completionMessageProcessingDelegate.lock()
                                 .expect("worker message processing delegate mutex poisoned")
                                 .recordCommittedAssistant(&completionChatId, completionTurnId, &completedMessage, 0);
+                            // Bind the cached provider prefix only to history that actually committed.
+                            match AIMessageManager::committedConversationContextSource(
+                                workerChatHistoryDelegate.getRuntimeChatHistory(completionChatId.clone()),
+                                &completionContextConfiguration, assistantMessageTimestamp, summaryContextBase,
+                            ) {
+                                Ok(Some(source)) => workerService.commitConversationContext(
+                                    &completionChatId, &completionContextConfiguration.profile.id, source,
+                                ),
+                                Ok(None) => {
+                                    AppLogger::v_with_level("ChatSummary",
+                                        "History changed while the response was running; its prepared context is not committed",
+                                        operit_util::AppLogger::VERBOSE_LEVEL_2);
+                                }
+                                Err(error) => {
+                                    AppLogger::e("ChatSummary", &format!(
+                                        "Failed to bind completed conversation context: {error}",
+                                    ));
+                                }
+                            }
                         }
                         drop(workerChatHistoryDelegate);
                         let guidanceContinuationTimestamp = if let Some(inbox) = workerGuidanceInbox.as_ref() {
@@ -3674,6 +3717,11 @@ mod tests {
             .register("chat-a".to_string(), original.clone())
             .unwrap();
         assert!(tasks.register("chat-a".to_string(), summaryTask()).is_err());
+        let existing = match tasks.registerOrGet("chat-a".to_string(), summaryTask()) {
+            Err(existing) => existing,
+            Ok(()) => panic!("an automatic summary must reuse the registered owner"),
+        };
+        assert!(Arc::ptr_eq(&existing.taskId, &original.taskId));
         assert!(Arc::ptr_eq(
             &tasks.get("chat-a").unwrap().taskId,
             &original.taskId

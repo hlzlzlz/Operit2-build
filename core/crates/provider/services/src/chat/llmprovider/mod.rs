@@ -67,6 +67,8 @@ pub mod SlidingWindowRateLimiter;
 mod StreamingResponseLines;
 #[path = "ProviderHttp.rs"]
 mod ProviderHttp;
+#[path = "ProviderQuotaProber.rs"]
+pub mod ProviderQuotaProber;
 #[path = "StructuredToolCallBridge.rs"]
 pub mod StructuredToolCallBridge;
 #[path = "ThinkingDialect.rs"]
@@ -76,7 +78,9 @@ pub mod ToolPkgJsAiProviderService;
 
 #[cfg(test)]
 #[path = "../../../../tests/ProviderMediaTestSupport.rs"]
-mod ProviderMediaTestSupport;
+pub(crate) mod ProviderMediaTestSupport;
 
 #[path = "LocalModelProvider.rs"]
 pub mod LocalModelProvider;
+#[path = "LocalGatewayTransport.rs"]
+pub mod LocalGatewayTransport;

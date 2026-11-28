@@ -303,6 +303,22 @@ display resolver as chat creation without reading model, speech or memory
 configuration. Model-only mode returns `null`; an unset portrait stays `null`.
 Deleted references and storage errors propagate to the caller.
 
+`characterCards.chat.presentation({ chatId })` requires version 0.2.12 and returns
+`{ kind, identity, participants }`. `kind` is `model`, `card` or `group`;
+`participants` contains every saved member in presentation order, including
+members who have not spoken. Each entry has its actual `id`, `name` and nullable
+`avatarUri`. The same `null`/existing-chat binding rules apply as for `identity`.
+Model-only mode returns a null identity and an empty roster. This read does not
+resolve execution settings or select a group speaker.
+
+`characterCards.chat.groupTurn(request)` requires version 0.2.11. Start with
+`{ action: "start", chatId, requestId, text, attachments }`, then query the same
+`chatId` and `requestId` with `action: "status"` or stop it with `action: "cancel"`.
+The provider reuses the existing group planner and native turn transport. It
+returns completed member replies in speaking order, including names, portraits
+and configured TTS IDs. Non-group chats return `not_group` without submitting
+input. Status and cancellation require the original authenticated caller.
+
 `characterCards.memory.query({ participantId, query, limit, snapshotId })`
 resolves the explicit participant's actual memory binding and reuses the
 plugin's existing query implementation. Results contain complete typed
@@ -386,6 +402,14 @@ or native Rust-engine acceptance test and does not require external credentials.
 Remaining memory/editor entry points use the same real main IPC rather than disabled
 placeholder controls:
 
+- Chat execution retains the first resolved USER.md bytes in memory for each
+  conversation ID, participant and primary memory owner. Later profile writes do
+  not rewrite that conversation's system prefix during the same plugin runtime;
+  new conversations read the current document. Empty profiles are retained too.
+  Restarting the app or reloading the plugin discards these snapshots. Reads
+  without a conversation ID stay current, and disabling user descriptions still
+  suppresses the profile immediately. Role prompts, model choices and permissions
+  continue to resolve from their current records.
 - Global `memoryPreferences` live in the existing v3 metadata transaction. New live
   execution profiles omit USER.md when disabled. Historical re-execution also
   suppresses the runtime profile text, without modifying its saved opaque marker. Disabling automatic updates stops automatic candidate enqueueing
@@ -409,6 +433,16 @@ export full backups or maintain their own embedding/scoring implementation. UI m
 mutations use the same domain operations as dependency clients. Extraction follows the
 Kotlin query budgets, duplicate-title prompt and new-identity merge behavior; the
 scheduler orders candidates by source timestamp before applying its twenty-record cap.
+
+Before retrieval or extraction, the shared memory-job source projection removes
+attachment bodies (including recalled memories and pasted files), workspace
+attachments, legacy memory blocks, media locators, `meta`, `think` and `thinking`
+blocks. Nested internal blocks are removed together, and an unfinished internal
+block suppresses its remaining body. Cleanup runs before retrieval
+length limits and before assembling the MEMORY request; automatic candidates,
+manual updates and history rebuilds use the same projection. The saved conversation
+is retained. A window with no authored user text after cleanup completes without
+retrieval, model calls or profile updates; an orphan assistant source remains invalid.
 
 Kotlin remains the behavior reference, with explicit implementation differences:
 lexical expansion uses bounded Unicode terms and Han unigrams/bigrams rather than
@@ -449,6 +483,8 @@ requires running the updated application.
 ### 原生实体弹窗
 
 从头像或角色侧栏打开的角色卡/群组预览和编辑由 `src/ui-entity-native.ts` 使用普通 Compose DSL 控件生成，不加载 WebView/HTML，也不复用宿主的角色业务控件。预览、编辑、删除确认和标签草稿在同一个原生 Dialog 中切换；保存使用原有主运行时请求，完成/取消仍使用真实的 PresentationV1 接收方。全屏/还原使用通用 `Dialog.properties.fullscreen`，全屏时移除平台弹窗边距并铺满可用窗口，而非扩大 WebView 内部元素。管理页列表、批量绑定、导入导出、共享记忆库、USER.md、记忆编辑与设置、记忆附件全部使用 DSL；角色页顶部“添加”菜单保留新建和导入两个入口。记忆页仍按全局设置、共享库、角色库排列，每个库保留图谱、用户资料、设置独立入口。只有图谱画布使用网页，其桥仅提供加载展示数据和节点/关系选择；所有按钮、表单与数据写入由 DSL 和主运行时负责。打开编辑或设置弹窗时移除画布 WebView，避免平台视图与原生表单叠加。
+
+删除角色卡或群组时，直接绑定它的聊天和待创建草稿会解除绑定；删除角色卡也会从群组中移除该成员，仍有成员的群组聊天保持绑定，变为空群组时解除绑定。如果删除的是当前选择，或当前群组因此变空，当前选择切换为普通聊天。删除确认按应用语言显示中文或英文。
 
 ### 可选角色插件与普通模型聊天
 

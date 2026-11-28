@@ -39,6 +39,7 @@ pub struct ClaudeProvider {
     pub enable_tool_call: bool,
     pub custom_headers: Vec<(String, String)>,
     enable_claude_1h_prompt_cache: bool,
+    gateway_binding: Option<String>,
     state: Arc<Mutex<ClaudeProviderState>>,
     cancel_signal: tokio::sync::watch::Sender<bool>,
 }
@@ -47,6 +48,7 @@ pub struct ClaudeProvider {
 struct ClaudeProviderState {
     inputTokenCount: i64,
     cachedInputTokenCount: i64,
+    cacheWriteInputTokenCount: i64,
     outputTokenCount: i64,
     cancelled: bool,
     tokenCacheManager: TokenCacheManager,
@@ -69,9 +71,16 @@ impl ClaudeProvider {
             enable_tool_call,
             custom_headers,
             enable_claude_1h_prompt_cache: false,
+            gateway_binding: None,
             state: Arc::new(Mutex::new(ClaudeProviderState::default())),
             cancel_signal: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    /// Binds Messages HTTP traffic to the device owning a local gateway.
+    pub fn with_gateway_binding(mut self, binding: String) -> Self {
+        self.gateway_binding = Some(binding);
+        self
     }
 
     /// Matches Kotlin enableClaude1hPromptCache; existing callers keep the default TTL.
@@ -125,7 +134,8 @@ impl ClaudeProvider {
         &self,
         request: super::ProviderHttp::RequestBuilder,
     ) -> Result<super::ProviderHttp::Response, AiServiceError> {
-        let request = request.key_getter(self.key_getter.clone(), KeyAuthentication::Header("x-api-key".into()));
+        let request = request.key_getter(self.key_getter.clone(), KeyAuthentication::Header("x-api-key".into()))
+            .gateway_binding(self.gateway_binding.clone());
         if self.is_cancelled() {
             return Err(AiServiceError::RequestCancelled);
         }
@@ -711,6 +721,11 @@ impl ClaudeProvider {
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .max(0);
+        if cache_creation > 0 {
+            if let Ok(mut state) = self.state.lock() {
+                state.cacheWriteInputTokenCount = cache_creation;
+            }
+        }
         let token_counts = TokenCounts {
             input: input_base.saturating_add(if open_ai_compatible {
                 0
@@ -746,8 +761,18 @@ impl AIService for ClaudeProvider {
             .expect("ClaudeProvider state mutex poisoned")
             .outputTokenCount
     }
+    fn cache_write_input_token_count(&self) -> i64 {
+        self.state
+            .lock()
+            .expect("ClaudeProvider state mutex poisoned")
+            .cacheWriteInputTokenCount
+    }
     fn provider_model(&self) -> String {
-        format!("{}:{}", self.provider_type, self.model_name)
+        let provider = match self.gateway_binding {
+            Some(_) => "LOCAL_GATEWAY",
+            None => &self.provider_type,
+        };
+        format!("{provider}:{}", self.model_name)
     }
     fn reset_token_counts(&mut self) {
         let mut state = self
@@ -757,6 +782,7 @@ impl AIService for ClaudeProvider {
         state.tokenCacheManager.reset_token_counts();
         state.inputTokenCount = 0;
         state.cachedInputTokenCount = 0;
+        state.cacheWriteInputTokenCount = 0;
         state.outputTokenCount = 0;
     }
     fn cancel_streaming(&mut self) {

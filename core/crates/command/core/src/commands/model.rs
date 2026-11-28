@@ -288,6 +288,7 @@ pub async fn run_model_command(
             let mut models = command
                 .modelManager()
                 .getAvailableProviderModels(providerId)
+                .await
                 .map_err(|error| error.to_string())?;
             if !includeHistory {
                 models.retain(|model| model.isFetched());
@@ -329,6 +330,7 @@ pub async fn run_model_command(
             let manager = command.modelManager();
             let available = manager
                 .getAvailableProviderModels(providerId)
+                .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|model| model.modelId == modelId)
@@ -369,6 +371,30 @@ pub async fn run_model_command(
                 "modelId": modelId,
                 "created": true
             }));
+        }
+        "provider-model-sync" => {
+            let providerId = requiredArg(
+                args,
+                1,
+                "usage: operit2 model provider-model-sync <provider-id>",
+            )?;
+            let result = command
+                .modelManager()
+                .syncProviderModels(providerId)
+                .map_err(|error| error.to_string())?;
+            output.push_stdout_line(format!(
+                "Synced {providerId}: added {}, removed {}, kept custom {}, total {}",
+                result.addedCount, result.removedCount, result.keptCustomCount, result.totalCount
+            ));
+            for adjustment in &result.bindingAdjustments {
+                output.push_stdout_line(format!(
+                    "- Binding {:?}: {} -> {}",
+                    adjustment.functionType,
+                    adjustment.previousModelId,
+                    adjustment.newModelId.as_deref().unwrap_or("(none)")
+                ));
+            }
+            output.setJsonStdout(serde_json::to_value(&result).map_err(|error| error.to_string())?);
         }
         "catalog-status" | "catalog-refresh" => {
             let manager = command.modelManager();
@@ -565,11 +591,15 @@ pub async fn run_model_command(
                 2,
                 "usage: operit2 model context-set <provider-id> <model-id> <max-context-length>",
             )?;
-            let maxContextLength = parse_f32_arg(
+            let maxContextKiloTokens = parse_f32_arg(
                 args.get(3),
                 "usage: operit2 model context-set <provider-id> <model-id> <max-context-length>",
             )?;
-            let context = ModelContextSpec { maxContextLength };
+            let context = ModelContextSpec {
+                maxContextTokens: ModelContextSpec::from_kilo_tokens(f64::from(
+                    maxContextKiloTokens,
+                )),
+            };
             let model = command
                 .modelManager()
                 .updateContextForModel(providerId, modelId, context.clone())
@@ -921,7 +951,7 @@ fn print_resolved_model_config(config: &ResolvedModelConfig, output: &mut CoreCo
     ));
     output.push_stdout_line(format!(
         "Context tokens: {}",
-        config.context.maxContextLength
+        config.context.maxContextTokens
     ));
     output.push_stdout_line(format!("Direct image: {}", config.capabilities.directImage));
     output.push_stdout_line(format!("Direct audio: {}", config.capabilities.directAudio));
@@ -948,7 +978,11 @@ fn print_context_spec(
     output: &mut CoreCommandOutput,
 ) {
     output.push_stdout_line(format!("Context for {providerId}:{modelId}"));
-    output.push_stdout_line(format!("Max context length: {}", context.maxContextLength));
+    output.push_stdout_line(format!(
+        "Max context length: {}K ({} tokens)",
+        context.kilo_tokens().round(),
+        context.maxContextTokens
+    ));
 }
 
 /// Prints summary settings for one provider model.
@@ -1142,6 +1176,7 @@ fn print_model_usage(output: &mut CoreCommandOutput) {
         "operit2 model provider-model-available-list <provider-id> [fetched|all]",
         "operit2 model provider-model-add <provider-id> <provider-model-id>",
         "operit2 model provider-model-create <provider-id> <provider-model-id>",
+        "operit2 model provider-model-sync <provider-id>",
         "operit2 model catalog-status",
         "operit2 model catalog-refresh",
         "operit2 model list",

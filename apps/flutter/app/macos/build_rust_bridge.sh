@@ -1,15 +1,20 @@
 #!/bin/sh
 set -eu
 
+# Xcode supplies its own PATH; preserve the CI-selected WebAssembly tools for
+# plugin packaging, which runs again within this build phase.
+if [ -n "${OPERIT_WASM_TOOL_PATH:-}" ]; then
+  export PATH="$OPERIT_WASM_TOOL_PATH:$PATH"
+fi
+
 repo_root="$PROJECT_DIR/../../../.."
 crate_dir="$repo_root/apps/flutter/native/operit-flutter-bridge"
 out_dir="$PROJECT_DIR/Flutter/ephemeral/rust"
 lib_name="liboperit_flutter_bridge.a"
 
-# Core embeds plugin assets at compile time. Prepare both built-in and optional
-# official packages before Cargo runs, including on the first clean build.
+# Prepare the Core asset index and the matching Flutter application resources.
 "$repo_root/.venv/bin/python" "$repo_root/plugins/tools/sync_plugin_packages.py" \
-  --source runtime --no-hot-reload
+  --source runtime --no-hot-reload --flutter-assets
 
 for arch in $ARCHS; do
   case "$arch" in

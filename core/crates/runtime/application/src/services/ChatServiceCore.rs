@@ -44,6 +44,7 @@ use operit_model::ChatHistoryListItem::ChatHistoryListItem;
 use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatMessageLocatorPreview::ChatMessageLocatorPreview;
 use operit_model::ChatTurnOptions::ChatTurnOptions;
+use operit_model::ContextWindowBreakdown::ContextWindowBreakdown;
 use operit_plugin_sdk::js_sdk::results::{JsOptional, MessageSendOutcome, MessageSendResultData};
 use operit_model::FunctionType::FunctionType;
 use operit_model::InputProcessingState::InputProcessingState;
@@ -134,7 +135,15 @@ pub struct ChatInputMenuSummary {
     pub currentWindowSize: i64,
     pub inputTokenCount: i64,
     pub outputTokenCount: i64,
-    pub maxContextLength: f64,
+    #[serde(default)]
+    pub cachedInputTokenCount: Option<i64>,
+    #[serde(default)]
+    pub cacheHitRate: Option<f64>,
+    pub maxContextTokens: i64,
+    #[serde(default)]
+    pub breakdown: Option<ContextWindowBreakdown>,
+    #[serde(default)]
+    pub summaryThresholdRatio: Option<f64>,
 }
 
 /// Bounded read-only plugin projection for the chat's execution Core.
@@ -423,6 +432,21 @@ impl ChatServiceCore {
             context.runtimeStorageHost.as_ref().ok_or("Local inference requires runtime storage")?;
             super::LocalLlmService::executeLocalLlm(context, modelBinding, requestJson, settingsJson).await
         }
+    }
+
+    /// Opens the configured gateway on its owning device using ordinary route permissions.
+    #[operit_route_macros::operit_core_route(binding = bindingKey, permission = "target:runtime.execute")]
+    pub fn openLocalGatewayResponse(&self, bindingKey: String, requestJson: String)
+        -> Result<operit_link::CoreStream<serde_json::Value>, String> {
+        super::LocalGatewayService::response(self.runtimeToolHandler().getContext(), bindingKey, requestJson)
+    }
+
+    /// Fetches gateway models from the same device that owns its inference requests.
+    #[operit_route_macros::operit_core_route(binding = bindingKey, permission = "target:runtime.execute")]
+    pub fn listLocalGatewayModels(&self, bindingKey: String)
+        -> Result<Vec<operit_model::ModelConfigData::AvailableProviderModel>, String> {
+        super::LocalGatewayService::requireOwner(&self.runtimeToolHandler().getContext(), &bindingKey)?;
+        ModelConfigManager::default().availableProviderModelsLocal(&bindingKey).map_err(|error| error.to_string())
     }
 
     /// Clones the plugin execution host before releasing the borrowed chat core.
@@ -1516,8 +1540,15 @@ impl ChatServiceCore {
     #[allow(non_snake_case)]
     #[operit_route_macros::operit_core_route(binding = chatId)]
     pub async fn deleteMessagesFrom(&mut self, chatId: String, messageTimestamp: i64) -> bool {
-        self.chatHistoryDelegate
-            .deleteMessagesFromTimestamp(chatId, messageTimestamp)
+        let deleted = self
+            .chatHistoryDelegate
+            .deleteMessagesFromTimestamp(chatId.clone(), messageTimestamp);
+        if deleted {
+            if let Some(delegate) = self.getTokenStatisticsDelegate() {
+                delegate.clearContextBreakdown(Some(chatId));
+            }
+        }
+        deleted
     }
 
     /// Deletes one alternate response variant from a message timestamp.
@@ -1525,6 +1556,11 @@ impl ChatServiceCore {
     pub fn deleteMessageVariant(&mut self, timestamp: i64, variantIndex: i32) {
         self.chatHistoryDelegate
             .deleteMessageVariant(timestamp, variantIndex);
+        if let Some(chatId) = self.chatHistoryDelegate.currentChatIdFlow.value() {
+            if let Some(delegate) = self.getTokenStatisticsDelegate() {
+                delegate.clearContextBreakdown(Some(chatId));
+            }
+        }
     }
 
     /// Selects the displayed response variant for one message timestamp.
@@ -1532,6 +1568,11 @@ impl ChatServiceCore {
     pub fn selectMessageVariant(&mut self, timestamp: i64, selectedVariantIndex: i32) {
         self.chatHistoryDelegate
             .selectMessageVariant(timestamp, selectedVariantIndex);
+        if let Some(chatId) = self.chatHistoryDelegate.currentChatIdFlow.value() {
+            if let Some(delegate) = self.getTokenStatisticsDelegate() {
+                delegate.clearContextBreakdown(Some(chatId));
+            }
+        }
     }
 
     /// Creates and resolves a branch with its source's persisted opaque binding before selecting it.
@@ -1604,6 +1645,16 @@ impl ChatServiceCore {
             }
         };
         // Generation must not persist a summary boundary before valid content exists.
+        let chat = match self.chatHistoryDelegate.chatHistoryManager.loadChatHistory(currentChatId.clone()) {
+            Ok(Some(chat)) => chat,
+            Ok(None) => return self.summaryInsertionFailed(Some(currentChatId), "对话不存在".into()),
+            Err(error) => return self.summaryInsertionFailed(Some(currentChatId), error.to_string()),
+        };
+        let summaryOptions = operit_providers::chat::EnhancedAIService::SummaryConversationOptions {
+            workspacePath: self.chatHistoryDelegate.primaryWorkspacePathForChat(&chat),
+            workspaceFolders: self.chatHistoryDelegate.workspaceFolderPathsForChat(&chat),
+            promptFunctionType: PromptFunctionType::CHAT,
+        };
         let summaryToast = self.messageProcessingDelegate.toastEventFlow.clone();
         let summaryMessage = match AIMessageManager::summarizeMemory(
             &mut enhancedAiService,
@@ -1611,6 +1662,7 @@ impl ChatServiceCore {
             false,
             currentChatId.clone(),
             &configuration,
+            summaryOptions,
             None,
             None,
             std::sync::Arc::new(move |error| {
@@ -1744,7 +1796,13 @@ impl ChatServiceCore {
 
     /// Removes every message from the currently selected chat.
     pub fn clearCurrentChat(&mut self) {
+        let chatId = self.chatHistoryDelegate.currentChatIdFlow.value();
         self.chatHistoryDelegate.clearCurrentChat();
+        if let Some(chatId) = chatId {
+            if let Some(delegate) = self.getTokenStatisticsDelegate() {
+                delegate.clearContextBreakdown(Some(chatId));
+            }
+        }
     }
 
     /// Serializes all chat histories into a JSON archive string.
@@ -1892,8 +1950,8 @@ impl ChatServiceCore {
 
     /// Removes the workspace binding from a chat without deleting workspace files.
     #[allow(non_snake_case)]
-    pub fn unbindChatFromWorkspace(&mut self, chatId: String) {
-        self.chatHistoryDelegate.unbindChatFromWorkspace(chatId);
+    pub fn unbindChatFromWorkspace(&mut self, chatId: String) -> Result<(), String> {
+        self.chatHistoryDelegate.unbindChatFromWorkspace(chatId)
     }
 
     /// Renames the workspace binding and chat title together.
@@ -1959,80 +2017,80 @@ impl ChatServiceCore {
             .restoreWorkspaceForMessage(workspacePath, messageTimestamp, Some(chatId))
     }
 
-    /// Rolls an explicit chat back to a prior message timestamp.
+    /// Captures shared state so plugin cancellation can reenter Core after Holder is released.
+    fn captureHistoryTruncate(
+        &self, chatId: String, messageTimestamp: i64,
+    ) -> impl std::future::Future<Output = Result<ChatMessage, String>> + 'static {
+        let target = self.chatHistoryDelegate.chatMessagesSnapshotForChat(chatId.clone())
+            .into_iter().find(|message| message.timestamp == messageTimestamp && message.sender == "user")
+            .ok_or_else(|| "History truncation requires an existing user message".to_string());
+        let workspace = self.resolveWorkspaceRewindTarget(chatId.clone(), messageTimestamp);
+        let context = self.runtimeToolHandler().getContext();
+        let mut history = self.chatHistoryDelegate.clone_for_core();
+        let mut processing = self.messageProcessingDelegate.clone_for_core();
+        async move {
+            let target = target?;
+            crate::plugins::toolpkg::ToolPkgChatLifecycleHookBridge::ToolPkgChatLifecycleHookBridge::dispatchBeforeHistoryTruncate(&chatId, messageTimestamp).await?;
+            processing.cancelMessageForDestructiveMutation(chatId.clone()).await?;
+            if let Some((workspaceChatId, workspacePath)) = workspace {
+                if matches!(WorkspaceBackupManager::getInstance(context)
+                    .restoreWorkspaceForMessage(workspacePath, messageTimestamp, Some(workspaceChatId)),
+                    WorkspaceRewindOutcome::Unavailable) {
+                    return Err("Workspace history snapshot is unavailable".to_string());
+                }
+            }
+            history.truncateChatHistoryForChat(chatId, Some(messageTimestamp));
+            Ok(target)
+        }
+    }
+
+    /// Rolls back history after disposing prior work outside the chat runtime Holder lock.
     #[allow(non_snake_case)]
     #[operit_route_macros::operit_core_route(binding = chatId)]
-    pub async fn rollbackToMessage(
+    pub fn rollbackToMessage(
         &mut self,
         chatId: String,
         messageTimestamp: i64,
-    ) -> Option<String> {
-        let currentMessages = self
-            .chatHistoryDelegate
-            .chatMessagesSnapshotForChat(chatId.clone());
-        let Some(targetMessage) = currentMessages
-            .into_iter()
-            .find(|message| message.timestamp == messageTimestamp)
-        else {
-            return None;
-        };
-        if targetMessage.sender != "user" {
-            return None;
+    ) -> impl std::future::Future<Output = Option<String>> + 'static {
+        let pending = self.captureHistoryTruncate(chatId, messageTimestamp);
+        async move {
+            match pending.await {
+                Ok(message) => Some(stripXmlLikeTags(&message.displayText())),
+                Err(error) => {
+                    AppLogger::e("ChatServiceCore", &format!("History rollback preparation failed: {error}"));
+                    None
+                }
+            }
         }
-        if matches!(
-            self.rewindWorkspaceForMessageTimestamp(chatId.clone(), messageTimestamp),
-            WorkspaceRewindOutcome::Unavailable
-        ) {
-            return None;
-        }
-        self.chatHistoryDelegate
-            .truncateChatHistoryForChat(chatId.clone(), Some(messageTimestamp));
-        Some(stripXmlLikeTags(&targetMessage.displayText()))
     }
 
-    /// Rewinds a user message and sends edited content as a new turn.
+    /// Rewinds and resends through captured native state without retaining Holder across plugin calls.
     #[allow(non_snake_case)]
     #[operit_route_macros::operit_core_route(binding = chatId)]
-    pub async fn rewindAndResendMessage(
+    pub fn rewindAndResendMessage(
         &mut self,
         chatId: String,
         messageTimestamp: i64,
         editedContent: String,
-    ) -> bool {
-        let currentMessages = self
-            .chatHistoryDelegate
-            .chatMessagesSnapshotForChat(chatId.clone());
-        let Some(targetMessage) = currentMessages
-            .into_iter()
-            .find(|message| message.timestamp == messageTimestamp)
-        else {
-            return false;
-        };
-        if targetMessage.sender != "user" {
-            return false;
+    ) -> impl std::future::Future<Output = bool> + 'static {
+        let pending = self.captureHistoryTruncate(chatId.clone(), messageTimestamp);
+        let starter = self.captureUserMessageStarter(Some(chatId), &ChatTurnOptions::default(), None);
+        async move {
+            let result = async {
+                let starter = starter?;
+                pending.await?;
+                starter.start(PromptFunctionType::CHAT, None, editedContent,
+                    None, None, None, Vec::new(), None, ChatTurnOptions::default(), None).await?;
+                Ok::<(), String>(())
+            }.await;
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    AppLogger::e("ChatServiceCore", &format!("History resend preparation failed: {error}"));
+                    false
+                }
+            }
         }
-        if matches!(
-            self.rewindWorkspaceForMessageTimestamp(chatId.clone(), messageTimestamp),
-            WorkspaceRewindOutcome::Unavailable
-        ) {
-            return false;
-        }
-        self.chatHistoryDelegate
-            .truncateChatHistoryForChat(chatId.clone(), Some(messageTimestamp));
-        self.sendUserMessage(
-            PromptFunctionType::CHAT,
-            None,
-            Some(chatId),
-            editedContent,
-            None,
-            None,
-            None,
-            Vec::new(),
-            None,
-            ChatTurnOptions::default(),
-        )
-        .await;
-        true
     }
 
     /// Regenerates one AI message in place while preserving the surrounding chat history.
@@ -2086,7 +2144,9 @@ impl ChatServiceCore {
 
     /// Clears the token counters associated with the current chat service.
     pub fn resetTokenStatistics(&mut self) {
-        if let Err(error) = UsageStatisticsStore::new().clearAllTokenUsageRecords() {
+        if let Err(error) = UsageStatisticsStore::new()
+            .clearUsageStatistics(operit_model::ProviderQuota::UsageResetScope::LOCAL_ONLY)
+        {
             AppLogger::e(
                 "TokenStatistics",
                 &format!("failed to clear token ledger: {error}"),
@@ -3099,19 +3159,101 @@ impl ChatServiceCore {
         };
         // A non-zero live estimate tracks every request/tool round and is reseeded on each
         // persisted write, so it is never older than the row; zero means a cold cache.
-        let liveWindowSize = if chatId.is_some() {
+        let mut liveWindowSize = if chatId.is_some() {
             self.getTokenStatisticsDelegate()
                 .map(|delegate| delegate.getLastCurrentWindowSize(chatId.clone()))
                 .unwrap_or(0)
         } else {
             0
         };
+        let liveBreakdown = if chatId.is_some() {
+            self.getTokenStatisticsDelegate()
+                .and_then(|delegate| delegate.getLastContextBreakdown(chatId.clone()))
+        } else {
+            None
+        };
         let persistedWindowSize = chat.as_ref().map(|c| c.currentWindowSize).unwrap_or(0);
+        let breakdown = if liveBreakdown.is_some() {
+            liveBreakdown
+        } else if let (Some(id), Some(chatRecord)) = (chatId.as_ref(), chat.as_ref()) {
+            let hasContent = persistedWindowSize > 0
+                || !self
+                    .chatHistoryDelegate
+                    .getRuntimeChatHistory(id.clone())
+                    .is_empty();
+            if hasContent {
+                if let Some(mut service) = self.newEnhancedAiServiceForChat(id) {
+                    match MessageCoordinationDelegate::calculateStableWindowWithBreakdownFromDelegates(
+                        &self.chatHistoryDelegate,
+                        &mut service,
+                        &chatRecord.id,
+                        None,
+                        PromptFunctionType::CHAT,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok((windowSize, computedBreakdown)) => {
+                            liveWindowSize = windowSize;
+                            if let Some(delegate) = self.getTokenStatisticsDelegate() {
+                                delegate.cacheContextBreakdown(
+                                    Some(id.clone()),
+                                    windowSize,
+                                    computedBreakdown,
+                                );
+                            }
+                            computedBreakdown
+                        }
+                        Err(error) => {
+                            AppLogger::v_with_level(
+                                "ChatServiceCore",
+                                &format!("Cold context breakdown estimation skipped for {}: {}", id, error),
+                                operit_util::AppLogger::VERBOSE_LEVEL_2,
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let summaryThresholdRatio = if config.summary.enableSummary {
+            let ratio = config.summary.tokenThresholdRatio();
+            (ratio.is_finite() && ratio > 0.0).then_some(ratio)
+        } else {
+            None
+        };
+        let (measuredInputTokens, cachedTokens) = match &chatId {
+            Some(id) => self
+                .chatHistoryDelegate
+                .chatHistoryManager
+                .getChatCachedTokenTotals(id)
+                .map_err(|e| e.to_string())?,
+            None => (0, 0),
+        };
+        let (cachedInputTokenCount, cacheHitRate) = if measuredInputTokens > 0 {
+            (
+                Some(cachedTokens),
+                Some((cachedTokens as f64 / measuredInputTokens as f64).clamp(0.0, 1.0)),
+            )
+        } else {
+            (None, None)
+        };
         Ok(ChatInputMenuSummary {
             currentWindowSize: if liveWindowSize > 0 { liveWindowSize } else { persistedWindowSize },
             inputTokenCount: chat.as_ref().map(|c| c.inputTokens).unwrap_or(0),
             outputTokenCount: chat.as_ref().map(|c| c.outputTokens).unwrap_or(0),
-            maxContextLength: f64::from(config.context.maxContextLength),
+            cachedInputTokenCount,
+            cacheHitRate,
+            maxContextTokens: i64::from(config.context.maxContextTokens),
+            breakdown,
+            summaryThresholdRatio,
         })
     }
 
@@ -3888,12 +4030,17 @@ mod chat_deletion_tests {
                 isLoading: true,
                 inputProcessingState: InputProcessingState::Processing { message: "processing".into() },
             });
-            let processing = core.messageProcessingDelegate.clone_for_core();
+            core.messageProcessingDelegate.resetCurrentTurnToolInvocationCount("route-chat".into());
+            core.messageProcessingDelegate.incrementCurrentTurnToolInvocationCount("route-chat".into());
+            let mut processing = core.messageProcessingDelegate.clone_for_core();
             let cancellationDatabase = database.clone();
             let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let observedSettlement = settled.clone();
             let pending = core.messageProcessingDelegate.cancelMessage("route-chat".into(), move |result| {
                 assert!(processing.isChatProcessing("route-chat"));
+                // Dispatch another chat's hook before cancellation publishes its terminal state.
+                assert_eq!(processing.currentTurnToolInvocationCountByChatIdFlow().value()["route-chat"], 1);
+                processing.setChatExecutionStateForTest("observer-chat".into(), ChatExecutionState::idle());
                 assert!(cancellationDatabase.store().beginChatExecution("route-chat").is_err());
                 assert!(!response.upstream.try_emit("late output".into()));
                 observedSettlement.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3913,9 +4060,60 @@ mod chat_deletion_tests {
             assert_eq!(pending.await.is_err(), failSettlement);
             assert!(settled.load(std::sync::atomic::Ordering::SeqCst));
             assert!(!core.messageProcessingDelegate.isChatProcessing("route-chat"));
+            assert_eq!(core.messageProcessingDelegate.currentTurnToolInvocationCountByChatIdFlow().value()["route-chat"], 1);
             let next = database.store().beginChatExecution("route-chat").unwrap();
             next.release().unwrap();
         }
+
+        // A stop in the summary window must still cancel the turn: streaming has
+        // finished and no operation remains registered, but the turn is not idle.
+        let lease = database.store().beginChatExecution("route-chat").unwrap();
+        let mut turn = ChatRuntime::new();
+        turn.activeTurnId = 30;
+        turn.executionLease = Some(lease);
+        let pendingSend = turn.cancellationToken.clone();
+        core.messageProcessingDelegate.chatRuntimes.lock().unwrap().insert("route-chat".into(), turn);
+        core.messageProcessingDelegate.setChatExecutionStateForTest("route-chat".into(), ChatExecutionState {
+            taskTitle: None,
+            currentRound: 0,
+            isLoading: false,
+            inputProcessingState: InputProcessingState::Summarizing { message: "summarizing".into() },
+        });
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observedSettlement = settled.clone();
+        let pending = core.messageProcessingDelegate.cancelMessage("route-chat".into(), move |result| {
+            observedSettlement.store(true, std::sync::atomic::Ordering::SeqCst);
+            result
+        });
+        {
+            let runtimes = core.messageProcessingDelegate.chatRuntimes.lock().unwrap();
+            let runtime = runtimes.get("route-chat").unwrap();
+            assert!(runtime.isCancelling, "a summary-window stop must reserve cancellation");
+            assert!(pendingSend.isCancelled(), "stopping between sends must close the turn's gate");
+            assert_eq!(runtime.activeTurnId, 31);
+        }
+        pending.await.unwrap();
+        assert!(settled.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!core.messageProcessingDelegate.isChatProcessing("route-chat"));
+        let next = database.store().beginChatExecution("route-chat").unwrap();
+        next.release().unwrap();
+
+        // Independent chat updates must not replace another chat's accounting snapshot.
+        let mut first = core.messageProcessingDelegate.clone_for_core();
+        let mut second = core.messageProcessingDelegate.clone_for_core();
+        first.resetCurrentTurnToolInvocationCount("route-chat".into());
+        second.resetCurrentTurnToolInvocationCount("observer-chat".into());
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..1000 { first.incrementCurrentTurnToolInvocationCount("route-chat".into()); }
+            });
+            scope.spawn(|| {
+                for _ in 0..1000 { second.incrementCurrentTurnToolInvocationCount("observer-chat".into()); }
+            });
+        });
+        let counts = core.messageProcessingDelegate.currentTurnToolInvocationCountByChatIdFlow().value();
+        assert_eq!(counts["route-chat"], 1000);
+        assert_eq!(counts["observer-chat"], 1000);
     }
 }
 
@@ -3982,14 +4180,29 @@ mod chat_input_menu_summary_tests {
         let summary = core.chatInputMenuSummary(Some("summary-stale".into())).await.unwrap();
         assert_eq!(summary.currentWindowSize, 1000);
         assert_eq!((summary.inputTokenCount, summary.outputTokenCount), (111, 22));
+        assert!((summary.summaryThresholdRatio.unwrap() - 0.85).abs() < 1e-6);
 
-        // A live mid-turn estimate must win over the row left by the previous completed turn.
-        core.getMessageCoordinationDelegate().unwrap().tokenStatisticsDelegate.setTokenCounts(
-            Some("summary-stale".into()), 111, 22, 5000,
+        // Live breakdown cached in TokenStatisticsDelegate flows into ChatInputMenuSummary and is
+        // cleared cleanly when clearContextBreakdown invalidates the chat's cache.
+        let sampleBreakdown = ContextWindowBreakdown {
+            systemPromptTokens: 1200,
+            toolTokens: 2500,
+            fileTokens: 300,
+            toolResultTokens: 700,
+            conversationTokens: 300,
+        };
+        core.getMessageCoordinationDelegate().unwrap().tokenStatisticsDelegate.setTokenCountsWithBreakdown(
+            Some("summary-stale".into()), 111, 22, 5000, Some(sampleBreakdown),
         );
         let summary = core.chatInputMenuSummary(Some("summary-stale".into())).await.unwrap();
         assert_eq!(summary.currentWindowSize, 5000);
+        assert_eq!(summary.breakdown, Some(sampleBreakdown));
         assert_eq!((summary.inputTokenCount, summary.outputTokenCount), (111, 22));
+
+        core.getTokenStatisticsDelegate().unwrap().clearContextBreakdown(Some("summary-stale".into()));
+        let summary = core.chatInputMenuSummary(Some("summary-stale".into())).await.unwrap();
+        assert_eq!(summary.currentWindowSize, 1000);
+        assert_eq!(summary.breakdown, None);
 
         // Production sends run on a deep-cloned worker delegate; its updates must reach the Core.
         let mut workerDelegate = core.getMessageCoordinationDelegate().unwrap().tokenStatisticsDelegate.clone();
@@ -4011,12 +4224,32 @@ mod chat_input_menu_summary_tests {
         database.chatDao().insertChat(other).unwrap();
         let summary = core.chatInputMenuSummary(Some("summary-other".into())).await.unwrap();
         assert_eq!(summary.currentWindowSize, 2000);
+        assert_eq!((summary.cachedInputTokenCount, summary.cacheHitRate), (None, None));
+
+        // Persisted message cached tokens determine per-chat cache hit totals cleanly.
+        let mut cachedMsg1 = ChatMessage::new_with_markdown_timestamp("ai".into(), "r1".into(), 100);
+        cachedMsg1.inputTokens = 1000;
+        cachedMsg1.cachedInputTokens = 600;
+        core.chatHistoryDelegate.addMessageToChat(cachedMsg1, Some("summary-stale".into()));
+        let mut cachedMsg2 = ChatMessage::new_with_markdown_timestamp("ai".into(), "r2".into(), 101);
+        cachedMsg2.inputTokens = 1000;
+        cachedMsg2.cachedInputTokens = 1200;
+        core.chatHistoryDelegate.addMessageToChat(cachedMsg2, Some("summary-stale".into()));
+        let summary = core.chatInputMenuSummary(Some("summary-stale".into())).await.unwrap();
+        assert_eq!(summary.cachedInputTokenCount, Some(1600));
+        assert!((summary.cacheHitRate.unwrap() - 0.8).abs() < 1e-6);
 
         // No selected conversation keeps returning zeros instead of the active chat's estimate.
         let summary = core.chatInputMenuSummary(None).await.unwrap();
         assert_eq!(
-            (summary.currentWindowSize, summary.inputTokenCount, summary.outputTokenCount),
-            (0, 0, 0)
+            (
+                summary.currentWindowSize,
+                summary.inputTokenCount,
+                summary.outputTokenCount,
+                summary.cachedInputTokenCount,
+                summary.cacheHitRate,
+            ),
+            (0, 0, 0, None, None)
         );
     }
 }

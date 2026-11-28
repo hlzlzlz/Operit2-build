@@ -2104,8 +2104,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "globset",
- "grep-regex",
- "grep-searcher",
  "ignore",
  "image",
  "libc",
@@ -2561,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "operit-runtime"
-version = "2.0.0-preview.44"
+version = "2.0.0-preview.46"
 dependencies = [
  "aes",
  "async-trait",

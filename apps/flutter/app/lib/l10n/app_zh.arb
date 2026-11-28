@@ -453,6 +453,9 @@
   },
   "chatSpeechInputConfigurationRequired": "请先在设置 > 模型与 AI 中添加并选中一个语音识别配置。",
   "chatSpeechNoTextRecognized": "未识别到文本",
+  "chatVoiceListening": "正在聆听…",
+  "chatVoiceStopListening": "停止录音",
+  "chatVoiceThinking": "识别中",
   "history": "历史记录",
   "bookmarks": "收藏夹",
   "downloads": "下载",
@@ -470,6 +473,7 @@
   "searchHistory": "搜索历史",
   "noDownloadTasks": "还没有下载任务",
   "openFile": "打开文件",
+  "openInOtherApp": "用其他应用打开",
   "workspaceFileOpening": "正在打开文件…",
   "workspaceFileOpenTimedOut": "打开文件超时，请重试。",
   "openLocation": "打开位置",
@@ -824,6 +828,8 @@
   "settingsModelProviderTypeOllama": "Ollama",
   "settingsModelProviderTypeOpenaiLocal": "OpenAI 本地",
   "settingsModelProviderTypeLocalModel": "本地模型",
+  "settingsModelProviderTypeLocalGateway": "本地网关",
+  "settingsModelLocalGatewayHint": "请在运行 Magpie、CC Switch 等网关的设备上创建此供应商。本地地址指该设备的地址；其他设备会通过 route 请求它。支持 /v1/chat/completions、/v1/responses 和 /v1/messages。网关设备需保持在线并允许远程执行。",
   "localModelsLoadFailed": "本地模型状态加载失败：{error}",
   "@localModelsLoadFailed": {
     "placeholders": {
@@ -970,6 +976,54 @@
   "settingsModelEditProvider": "编辑供应商",
   "settingsModelAddModel": "添加模型",
   "settingsModelAddModelShort": "添加",
+  "settingsModelSyncModels": "同步模型",
+  "settingsModelSyncingModels": "同步中...",
+  "settingsModelSyncModelsTooltip": "拉取最新模型列表并自动清理已下线的非自定义模型",
+  "settingsModelCustomBadge": "自定义",
+  "settingsModelSyncUpToDate": "模型列表已是最新（共 {total} 个）",
+  "@settingsModelSyncUpToDate": {
+    "placeholders": {
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSummary": "同步完成：新增 {added} 个，移除 {removed} 个，保留 {keptCustom} 个自定义模型",
+  "@settingsModelSyncSummary": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "keptCustom": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSwitchedBinding": "同步完成（+{added}，-{removed}），已下线的绑定模型已自动切换为 {target}",
+  "@settingsModelSyncSwitchedBinding": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelSyncMissingBinding": "同步完成（移除 {removed} 个），原绑定模型已下线且当前无可用模型，请重新选择或添加",
+  "@settingsModelSyncMissingBinding": {
+    "placeholders": {
+      "removed": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelAvailableFetchedOnly": "仅拉取到的",
   "settingsModelAvailableIncludeHistory": "包含历史",
   "settingsModelAvailableSourceFetched": "已拉取",
@@ -1642,6 +1696,9 @@
   "settingsAppearanceMessageDensity": "消息间距",
   "settingsAppearanceMessageDensityComfortable": "舒适",
   "settingsAppearanceMessageDensityCompact": "紧凑",
+  "settingsAppearanceChatHorizontalPadding": "聊天正文左右留白",
+  "settingsAppearanceChatHorizontalPaddingEdge": "贴边",
+  "settingsAppearanceChatHorizontalPaddingDetail": "调小后正文更宽；气泡与输入框自身的留白不受影响。",
   "settingsAppearanceWideLayout": "使用更宽的聊天布局",
   "settingsAppearanceRoundedMessages": "消息卡片圆角",
   "settingsAppearanceShowAvatars": "显示消息头像",
@@ -3408,5 +3465,102 @@
   "settingsToolsReadWriteDescription": "AI 可以读写当前工作区，应用内沙盒保持开启。",
   "settingsToolsFullAccessDescription": "AI 可以读写当前工作区，并关闭应用内沙盒。",
   "settingsToolsAuthorizationFailed": "授权失败：{error}",
-  "settingsToolsItemCount": "{count} 项"
+  "settingsToolsItemCount": "{count} 项",
+  "settingsUsageTabAnalytics": "Token 用量与性能",
+  "settingsUsageTabQuotas": "供应商余额与配额",
+  "settingsUsageDeviceScopeAll": "全部 Space 设备",
+  "settingsUsageDeviceScopeLocal": "仅本机",
+  "settingsUsageExportJson": "复制 JSON 报告",
+  "settingsUsageExportCsv": "复制 CSV 表格",
+  "settingsUsageExportCopied": "统计报告已复制到剪贴板",
+  "settingsUsageResetScopeTitle": "重置使用统计",
+  "settingsUsageResetLocalOnly": "仅清空本机产生记录",
+  "settingsUsageResetAllSpace": "清空整个 Space 跨设备记录",
+  "settingsUsageResetScopeWarning": "「仅清空本机」仅移除本机产生的数据并保留其他设备记录；「清空整个 Space」将同步清理所有设备上的历史。",
+  "settingsUsageKpiThroughput": "平均生成速度",
+  "settingsUsageKpiTtftMedian": "首字延迟 P50：{ttft}",
+  "settingsUsageKpiSpeedSamples": "{count} 次流式样本",
+  "settingsUsageKpiReasoning": "思考",
+  "settingsUsageKpiCacheWrite": "缓存写入",
+  "settingsUsageKpiSuccessRate": "{ok} 成功 · {err} 失败/取消",
+  "settingsUsageTimelineSpeedTitle": "输出吞吐速度 (tok/s)",
+  "settingsUsageTimelineSpeedDetail": "流式输出 {speed} tok/s · 首字延迟 {ttft}",
+  "settingsUsageTimelineNoSpeedData": "暂无满足 ≥100ms 的流式测速样本",
+  "settingsUsageAttrModels": "模型明细",
+  "settingsUsageAttrSources": "角色与来源",
+  "settingsUsageAttrDevices": "跨设备归因",
+  "settingsUsageAttrLogs": "请求流水",
+  "settingsUsageColSpeed": "速度",
+  "settingsUsageColTtft": "首字",
+  "settingsUsageColSpend": "估算费用",
+  "settingsUsageColShare": "占比",
+  "settingsUsageDeviceUnknown": "本机 / 历史记录",
+  "settingsUsageLogFilterRecent": "最新",
+  "settingsUsageLogFilterTopTokens": "最高用量",
+  "settingsUsageLogFilterIssues": "失败与取消",
+  "settingsUsageLogFilterReasoning": "含推理过程",
+  "settingsUsageStatusCompleted": "已完成",
+  "settingsUsageStatusCancelled": "已取消",
+  "settingsUsageStatusFailed": "失败",
+  "settingsUsageRequestDetailTitle": "请求遥测详情",
+  "settingsUsageLatencyBreakdown": "等待 {wait} · 输出 {stream}",
+  "settingsQuotaProbeAll": "全部刷新",
+  "settingsQuotaProbeSingle": "刷新余额",
+  "settingsQuotaProbeViaNode": "通过 Space 在线节点代查",
+  "settingsQuotaFilterAll": "全部",
+  "settingsQuotaFilterBalance": "按量余额",
+  "settingsQuotaFilterSubscription": "订阅配额",
+  "settingsQuotaFilterLocal": "本地算力",
+  "settingsQuotaFilterBudget": "预算与控制台",
+  "settingsQuotaRemainingLabel": "可用余额",
+  "settingsQuotaCashLabel": "充值",
+  "settingsQuotaGrantedLabel": "赠金",
+  "settingsQuotaUsedLabel": "已用",
+  "settingsQuotaDailyUsedLabel": "今日",
+  "settingsQuotaMonthlyUsedLabel": "本月",
+  "settingsQuotaKeyPoolCount": "Key 池 ({count})",
+  "settingsQuotaStatusOk": "正常",
+  "settingsQuotaStatusUnauthorized": "认证失败",
+  "settingsQuotaStatusError": "查询失败",
+  "settingsQuotaStatusStale": "未查询",
+  "settingsQuotaStatusUnsupported": "无公开余额接口",
+  "settingsQuotaProbedBy": "由 {device} 查询于 {time}",
+  "settingsQuotaOpenConsole": "官网账单",
+  "settingsQuotaProtocolConfig": "探测协议",
+  "settingsQuotaSetBudget": "月度预算",
+  "settingsQuotaEditBudget": "调整预算",
+  "settingsQuotaBudgetProgress": "本周期已消耗 {spent} / {limit}",
+  "settingsQuotaBudgetExceeded": "已达到预算预警阈值",
+  "settingsQuotaDialogBudgetLimit": "每月费用上限",
+  "settingsQuotaDialogResetDay": "账单重置日 (1-28)",
+  "settingsQuotaDialogAlertPct": "预警百分比 (%)",
+  "settingsQuotaDialogProtocolLabel": "余额探测协议",
+  "settingsQuotaDialogCustomPath": "自定义接口路径 (如 /api/balance)",
+  "settingsQuotaDialogAmountJsonPath": "余额字段 JSON 路径 (如 data.balance)",
+  "settingsQuotaDialogCurrencyJsonPath": "币种字段 JSON 路径（可选）",
+  "settingsQuotaDialogClear": "清除",
+  "settingsQuotaEmptyProviders": "尚未配置任何模型供应商",
+  "settingsQuotaLocalZeroCost": "端侧本地算力 · 零 API 费用",
+  "settingsUsageColStatus": "状态",
+  "settingsUsageColTime": "时间",
+  "settingsUsageModeStream": "流式",
+  "settingsUsageModeNonStream": "非流式",
+  "settingsUsageTopModelsTitle": "模型分布与 Token 构成",
+  "settingsUsageTokenMixLabel": "Token 构成比例",
+  "settingsUsageDirectInputLabel": "直传输入",
+  "settingsUsageNoModelsInRange": "当前时间窗口暂无模型调用",
+  "settingsUsageKpiNoPriceHint": "未匹配模型单价，请检查定价",
+  "settingsUsageKpiStreamHint": "需包含 ≥100ms 流式输出",
+  "settingsUsageHeatmapWeeks": "近 {weeks} 周活跃度",
+  "settingsQuotaSummaryTotalRemaining": "已探测总余额",
+  "settingsQuotaSummaryProviders": "{ready} 项正常 · 共 {total} 个供应商",
+  "settingsQuotaSummaryAlertCount": "{count} 项预警",
+  "settingsUsageHeatmapSubtitle": "最近 {weeks} 周的每日用量",
+  "settingsUsageHeatmapMetricTokens": "Token",
+  "settingsUsageHeatmapMetricRequests": "请求",
+  "settingsUsageHeatmapMetricCost": "费用",
+  "settingsUsageWeekdayMon": "周一",
+  "settingsUsageWeekdayWed": "周三",
+  "settingsUsageWeekdayFri": "周五",
+  "settingsUsageWeekdaySun": "周日"
 }

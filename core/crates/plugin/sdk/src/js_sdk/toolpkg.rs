@@ -1695,12 +1695,15 @@ pub struct ToolPkgChatViewHookEvent {
     pub base_hook_event_base:
         ToolPkgHookEventBase<ToolPkgChatViewEventName, ToolPkgChatViewEventPayload>,
 }
-/// Identifies the sole synchronous chat creation lifecycle event.
+/// Identifies awaited chat creation and destructive history lifecycle events.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum ToolPkgChatLifecycleEventName {
     /// Runs before chat configuration resolution and transactional persistence.
     #[serde(rename = "before_create")]
     BeforeCreate,
+    /// Stops plugin-owned work before native history is truncated.
+    #[serde(rename = "before_history_truncate")]
+    BeforeHistoryTruncate,
 }
 /// Identifies whether the draft creates a new conversation or branches from an existing message.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -1740,10 +1743,26 @@ pub struct ToolPkgChatLifecycleEventPayload {
     /// Contains only this registered owner's source namespace, never the complete extension map.
     pub sourceExtension: super::JsNullable<ToolPkgJsonObject>,
 }
-/// Combines existing ToolPkg execution metadata with the strict isolated creation payload.
+/// Supplies the exact persisted history boundary before native truncation.
+pub struct ToolPkgChatHistoryTruncatePayload {
+    /// Identifies the before-history-truncate lifecycle stage.
+    pub eventName: ToolPkgChatLifecycleEventName,
+    /// Identifies the conversation whose history will change.
+    pub chatId: String,
+    /// Identifies the first message removed by the requested truncation.
+    pub firstDeletedMessageTimestamp: f64,
+}
+/// Distinguishes creation input from an explicit destructive history boundary.
+pub enum ToolPkgChatLifecyclePayload {
+    /// Supplies an isolated creation draft.
+    Variant1(ToolPkgChatLifecycleEventPayload),
+    /// Supplies a persisted conversation and exact truncation boundary.
+    Variant2(ToolPkgChatHistoryTruncatePayload),
+}
+/// Combines existing ToolPkg execution metadata with the typed lifecycle payload.
 pub struct ToolPkgChatLifecycleHookEvent {
     /// Supplies the same typed hook envelope used by the actual main hook executor.
-    pub base_hook_event_base: ToolPkgHookEventBase<ToolPkgChatLifecycleEventName, ToolPkgChatLifecycleEventPayload>,
+    pub base_hook_event_base: ToolPkgHookEventBase<ToolPkgChatLifecycleEventName, ToolPkgChatLifecyclePayload>,
 }
 /// Requires an explicit extension object or null; null and undefined are not valid top-level results.
 pub struct ToolPkgChatLifecycleHookResult {
@@ -3119,6 +3138,8 @@ pub struct ToolPkgFloatingWindowOptions {
 }
 /// Opens a transparent live UI surface owned by the executing plugin.
 pub struct ToolPkgFloatingWindowOpenOptions {
+    /// Explicitly limits this window to the application view; defaults to false.
+    pub applicationOnly: Option<bool>,
     /// Identifies the window within this plugin; opening an existing ID fails.
     pub id: String,
     /// Selects one of this plugin's registered Compose UI routes.
@@ -3132,6 +3153,8 @@ pub struct ToolPkgFloatingWindowOpenOptions {
 }
 /// Declares the content of one managed window; route and fill stay fixed while it exists.
 pub struct ToolPkgFloatingWindowContent {
+    /// Explicitly limits this window to the application view; defaults to false.
+    pub applicationOnly: Option<bool>,
     pub route: String,
     /// Shallow-merges supplied JSON state into the live UI session.
     pub state: Option<JsObject>,
@@ -3154,6 +3177,10 @@ pub enum ToolPkgFloatingWindowSetResult {
 /// Reports the actual presentation scope and host capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolPkgFloatingWindowCapabilities {
+    /// Reports camera support independently of system overlay support.
+    pub cameraSupported: bool,
+    /// Requires an application window for camera preview on this host.
+    pub cameraRequiresApplicationWindow: bool,
     /// "system", "application", or "unsupported". Application scope stays inside Operit.
     pub scope: String,
     pub systemOverlay: bool,
@@ -3164,6 +3191,8 @@ pub struct ToolPkgFloatingWindowCapabilities {
     pub alwaysOnTop: bool,
     pub clickThrough: bool,
     pub focusable: bool,
+    /// Indicates support for echo cancellation in microphone capture.
+    pub recordingEchoCancellation: Option<bool>,
 }
 /// Describes a live window owned by the executing plugin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3179,12 +3208,26 @@ pub struct ToolPkgFloatingWindowRecordingOptions {
     pub maxDurationMs: Option<u32>,
     /// Stops after this much trailing silence (300–3000 ms) once speech is detected.
     pub silenceMs: Option<u32>,
+    /// Requests echo cancellation and keeps a short lead-in before detected speech.
+    pub echoCancellation: Option<bool>,
 }
 /// Carries a complete speech recording ready for STT.
 pub struct ToolPkgFloatingWindowRecording {
     pub audio: Vec<u8>,
     pub fileName: String,
     pub contentType: String,
+}
+/// Selects the presentation scope queried without opening a window.
+pub struct ToolPkgFloatingWindowCapabilityOptions {
+    pub applicationOnly: Option<bool>,
+}
+/// Describes a temporary camera selection; plugins persist files needed after app exit.
+pub struct ToolPkgFloatingWindowCameraFrame {
+    /// Temporary VFS path; copy to persistent storage before retaining in chat history.
+    pub path: String,
+    pub name: String,
+    pub mimeType: String,
+    pub size: i64,
 }
 /// Controls general floating windows independently of launcher widgets.
 pub struct ToolPkgFloatingWindowApi;
@@ -3193,7 +3236,7 @@ pub trait ToolPkgFloatingWindowApiMethods: Send + Sync {
     /// The host serializes lifecycle changes. Unavailable hosts return an explicit status; other errors reject.
     fn set(&self, id: String, content: JsNullable<ToolPkgFloatingWindowContent>) -> JsFuture<ToolPkgFloatingWindowSetResult>;
     /// Queries capabilities without opening a window or displaying a permission prompt.
-    fn capabilities(&self) -> JsFuture<ToolPkgFloatingWindowCapabilities>;
+    fn capabilities(&self, options: Option<ToolPkgFloatingWindowCapabilityOptions>) -> JsFuture<ToolPkgFloatingWindowCapabilities>;
     /// Opens the host's overlay permission settings when required; query capabilities again afterwards.
     fn requestPermission(&self) -> JsFuture<bool>;
     /// Creates a transparent live route session. IDs are local to the executing plugin.
@@ -3212,10 +3255,16 @@ pub trait ToolPkgFloatingWindowApiMethods: Send + Sync {
     fn record(&self, id: String, options: Option<ToolPkgFloatingWindowRecordingOptions>) -> JsFuture<JsNullable<ToolPkgFloatingWindowRecording>>;
     /// Reads the normalized microphone level (0 to 1) for this owned window; zero while idle.
     fn recordingLevel(&self, id: String) -> JsFuture<f64>;
+    /// Reports whether the current recording has detected speech.
+    fn recordingHasSpeech(&self, id: String) -> JsFuture<bool>;
     /// Ends active capture and delivers its WAV to the pending record call.
     fn finishRecording(&self, id: String) -> JsFuture<()>;
     /// Discards active capture without returning audio.
     fn cancelRecording(&self, id: String) -> JsFuture<()>;
+    /// Changes the window geometry without resetting the live UI or camera.
+    fn setFullscreen(&self, id: String, fullscreen: bool) -> JsFuture<()>;
+    /// Captures a temporary file from a user-enabled camera; null while off, hidden or unsupported.
+    fn captureCameraFrame(&self, id: String) -> JsFuture<JsNullable<ToolPkgFloatingWindowCameraFrame>>;
 }
 /// Groups runtime presentation services for plugin-owned user interfaces.
 pub struct ToolPkgUiApi {

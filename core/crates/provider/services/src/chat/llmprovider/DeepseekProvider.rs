@@ -16,7 +16,8 @@ use super::OpenAIResponsesProvider::{
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
 use super::ThinkingDialect::ThinkingDialect;
 use crate::chat::llmprovider::AIService::{
-    response_stream_from_chunks, AIService, AiServiceError, SendMessageRequest, TokenCounts,
+    response_stream_from_chunks, AIService, AiServiceError, ExtendedTokenCounts,
+    SendMessageRequest, TokenCounts, parse_extended_usage_counts,
 };
 use crate::runtime_support::ProviderRuntimeContext;
 use operit_model::ModelConfigData::{BuiltinToolRequestFormat, ModelBuiltinTool};
@@ -25,8 +26,8 @@ use operit_model::ModelParameter::ParameterValueType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_model::ToolPrompt::ToolPrompt;
 use operit_util::stream::RevisableTextStream::{
-    with_event_channel_and_failure, RevisableTextStream, RevisableTextStreamLike,
-    ResponseStreamItem, TerminalFailureState, TextStreamEventCarrier, TextStreamEventType,
+    with_ordered_event_channel_and_failure, ResponseStreamItem, RevisableTextStream,
+    RevisableTextStreamLike, TerminalFailureState, TextStreamEventCarrier, TextStreamEventType,
 };
 use operit_util::stream::Stream::{FnStream, Stream};
 use operit_util::AppLogger::AppLogger;
@@ -306,6 +307,8 @@ pub struct DeepseekProvider {
 struct DeepseekProviderState {
     inputTokenCount: i64,
     cachedInputTokenCount: i64,
+    cacheWriteInputTokenCount: i64,
+    reasoningTokenCount: i64,
     outputTokenCount: i64,
     cancelled: bool,
     tokenCacheManager: TokenCacheManager,
@@ -344,6 +347,92 @@ impl DeepseekProvider {
         }
     }
 
+    /// Decodes the parent transport while retaining cancellation, usage and stream revisions.
+    fn decode_parent_stream(&self, mut parent: OpenAIProvider, result: Box<dyn RevisableTextStreamLike>) -> Box<dyn RevisableTextStreamLike> {
+        let mut provider = self.clone();
+        let activeParentGeneration = provider.setActiveParent(parent.clone());
+        if provider.isCancelled() { parent.cancel_streaming(); }
+        let event_channel = result.event_channel().clone();
+        let terminalFailure = TerminalFailureState::new();
+        let producerTerminalFailure = terminalFailure.clone();
+        let mut ownedResult = Some(result);
+        let mut ownedParent = Some(parent);
+        let mut ownedProvider = Some(provider);
+        let cold_stream = FnStream::new(move |emit| {
+            let mut result = ownedResult
+                .take()
+                .expect("Deepseek parent stream must only be collected once");
+            let mut parent = ownedParent
+                .take()
+                .expect("Deepseek parent stream must only be collected once");
+            let mut provider = ownedProvider
+                .take()
+                .expect("Deepseek parent stream must only be collected once");
+            let producerTerminalFailure = producerTerminalFailure.clone();
+            Box::pin(async move {
+                let mut decoder = DeepseekDsmlDecoder::default();
+                let mut savepoints = HashMap::new();
+                let mut decodingError = None;
+                result
+                    .collect_ordered(&mut |item| match item {
+                        ResponseStreamItem::Chunk(chunk) if decodingError.is_none() => {
+                            match decoder.push(&chunk) {
+                                Ok(content) if !content.is_empty() => emit(ResponseStreamItem::Chunk(content)),
+                                Ok(_) => {}
+                                Err(error) => {
+                                    decodingError = Some(error.to_string());
+                                    parent.cancel_streaming();
+                                }
+                            }
+                        }
+                        ResponseStreamItem::Revision(event) => {
+                            match event.event_type {
+                                TextStreamEventType::Savepoint => {
+                                    savepoints.insert(event.id.clone(), decoder.clone());
+                                }
+                                TextStreamEventType::Rollback => {
+                                    if let Some(saved) = savepoints.get(&event.id) {
+                                        decoder.clone_from(saved);
+                                    }
+                                }
+                            }
+                            emit(ResponseStreamItem::Revision(event));
+                        },
+                        _ => {}
+                    })
+                    .await;
+                if let Some(error) = decodingError {
+                    producerTerminalFailure.set(error);
+                } else if let Some(error) = result.terminal_failure() {
+                    producerTerminalFailure.set(error);
+                } else {
+                    match decoder.finish() {
+                        Ok(tail) if !tail.is_empty() => emit(ResponseStreamItem::Chunk(tail)),
+                        Ok(_) => {}
+                        Err(error) => producerTerminalFailure.set(error.to_string()),
+                    }
+                }
+                AppLogger::v_with_level(
+                    PROVIDER_TRANSPORT_LOG_TAG,
+                    &format!(
+                        "provider.deepseek.parent.stream.done providerModel={} inputTokens={} cachedInputTokens={} outputTokens={}",
+                        parent.provider_model(),
+                        parent.input_token_count(),
+                        parent.cached_input_token_count(),
+                        parent.output_token_count(),
+                    ),
+                    operit_util::AppLogger::VERBOSE_LEVEL_3,
+                );
+                provider.finishActiveParent(activeParentGeneration, TokenCounts {
+                    input: (parent.input_token_count() - parent.cached_input_token_count()).max(0),
+                    cached_input: parent.cached_input_token_count(),
+                    output: parent.output_token_count(),
+                });
+            })
+        });
+        Box::new(with_ordered_event_channel_and_failure(cold_stream, event_channel, terminalFailure))
+    }
+
     fn apply_token_counts(&self, token_counts: TokenCounts) {
         if let Ok(mut state) = self.state.lock() {
             if token_counts.input > 0 || token_counts.cached_input > 0 {
@@ -380,6 +469,20 @@ impl DeepseekProvider {
         }
     }
 
+    fn currentExtendedCounts(&self) -> ExtendedTokenCounts {
+        let state = self.state.lock().expect("DeepseekProvider state mutex poisoned");
+        match state.activeParent.as_ref() {
+            Some(parent) => ExtendedTokenCounts {
+                cache_write_input: parent.cache_write_input_token_count(),
+                reasoning: parent.reasoning_token_count(),
+            },
+            None => ExtendedTokenCounts {
+                cache_write_input: state.cacheWriteInputTokenCount,
+                reasoning: state.reasoningTokenCount,
+            },
+        }
+    }
+
     fn setActiveParent(&self, parent: OpenAIProvider) -> u64 {
         let mut state = self
             .state
@@ -409,6 +512,15 @@ impl DeepseekProvider {
             state.inputTokenCount = state.tokenCacheManager.total_input_token_count();
             state.cachedInputTokenCount = state.tokenCacheManager.cached_input_token_count();
             state.outputTokenCount = state.tokenCacheManager.output_token_count();
+            if let Some((cw, r)) = state.activeParent.as_ref().map(|parent| {
+                (
+                    parent.cache_write_input_token_count(),
+                    parent.reasoning_token_count(),
+                )
+            }) {
+                state.cacheWriteInputTokenCount = cw;
+                state.reasoningTokenCount = r;
+            }
             state.activeParent = None;
         }
     }
@@ -733,6 +845,17 @@ impl DeepseekProvider {
                 output: 0,
             });
         self.apply_token_counts(token_counts);
+        if let Some(usage) = response.get("usage") {
+            let extended = parse_extended_usage_counts(usage);
+            if let Ok(mut state) = self.state.lock() {
+                if extended.cache_write_input > 0 {
+                    state.cacheWriteInputTokenCount = extended.cache_write_input;
+                }
+                if extended.reasoning > 0 {
+                    state.reasoningTokenCount = extended.reasoning;
+                }
+            }
+        }
         let mut chunks = Vec::new();
         if let Some(reasoning) = extract_reasoning_chunk(response) {
             if !reasoning.is_empty() {
@@ -780,6 +903,14 @@ impl AIService for DeepseekProvider {
         self.currentTokenCounts().output
     }
 
+    fn cache_write_input_token_count(&self) -> i64 {
+        self.currentExtendedCounts().cache_write_input
+    }
+
+    fn reasoning_token_count(&self) -> i64 {
+        self.currentExtendedCounts().reasoning
+    }
+
     fn provider_model(&self) -> String {
         format!("{}:{}", self.provider_type, self.model_name)
     }
@@ -790,6 +921,8 @@ impl AIService for DeepseekProvider {
             state.activeParent = None;
             state.inputTokenCount = 0;
             state.cachedInputTokenCount = 0;
+            state.cacheWriteInputTokenCount = 0;
+            state.reasoningTokenCount = 0;
             state.outputTokenCount = 0;
             state.tokenCacheManager.reset_token_counts();
         }
@@ -842,91 +975,7 @@ impl AIService for DeepseekProvider {
                 ),
                 operit_util::AppLogger::VERBOSE_LEVEL_3,
             );
-            let event_channel = result.event_channel().clone();
-            let terminalFailure = TerminalFailureState::new();
-            let producerTerminalFailure = terminalFailure.clone();
-            let mut provider = self.clone();
-            let activeParentGeneration = provider.setActiveParent(parent.clone());
-            if provider.isCancelled() {
-                parent.cancel_streaming();
-            }
-            let mut ownedResult = Some(result);
-            let mut ownedParent = Some(parent);
-            let mut ownedProvider = Some(provider);
-            let cold_stream = FnStream::new(move |emit| {
-                let mut result = ownedResult
-                    .take()
-                    .expect("Deepseek parent stream must only be collected once");
-                let mut parent = ownedParent
-                    .take()
-                    .expect("Deepseek parent stream must only be collected once");
-                let mut provider = ownedProvider
-                    .take()
-                    .expect("Deepseek parent stream must only be collected once");
-                let producerTerminalFailure = producerTerminalFailure.clone();
-                Box::pin(async move {
-                    let mut decoder = DeepseekDsmlDecoder::default();
-                    let mut savepoints = HashMap::new();
-                    let mut decodingError = None;
-                    result
-                        .collect_ordered(&mut |item| match item {
-                            ResponseStreamItem::Chunk(chunk) if decodingError.is_none() => {
-                                match decoder.push(&chunk) {
-                                    Ok(content) if !content.is_empty() => emit(content),
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        decodingError = Some(error.to_string());
-                                        parent.cancel_streaming();
-                                    }
-                                }
-                            }
-                            ResponseStreamItem::Revision(event) => match event.event_type {
-                                TextStreamEventType::Savepoint => {
-                                    savepoints.insert(event.id, decoder.clone());
-                                }
-                                TextStreamEventType::Rollback => {
-                                    if let Some(saved) = savepoints.get(&event.id) {
-                                        decoder.clone_from(saved);
-                                    }
-                                }
-                            },
-                            _ => {}
-                        })
-                        .await;
-                    if let Some(error) = decodingError {
-                        producerTerminalFailure.set(error);
-                    } else if let Some(error) = result.terminal_failure() {
-                        producerTerminalFailure.set(error);
-                    } else {
-                        match decoder.finish() {
-                            Ok(tail) if !tail.is_empty() => emit(tail),
-                            Ok(_) => {}
-                            Err(error) => producerTerminalFailure.set(error.to_string()),
-                        }
-                    }
-                    AppLogger::v_with_level(
-                        PROVIDER_TRANSPORT_LOG_TAG,
-                        &format!(
-                            "provider.deepseek.parent.stream.done providerModel={} inputTokens={} cachedInputTokens={} outputTokens={}",
-                            parent.provider_model(),
-                            parent.input_token_count(),
-                            parent.cached_input_token_count(),
-                            parent.output_token_count(),
-                        ),
-                        operit_util::AppLogger::VERBOSE_LEVEL_3,
-                    );
-                    provider.finishActiveParent(activeParentGeneration, TokenCounts {
-                        input: (parent.input_token_count() - parent.cached_input_token_count()).max(0),
-                        cached_input: parent.cached_input_token_count(),
-                        output: parent.output_token_count(),
-                    });
-                })
-            });
-            return Ok(Box::new(with_event_channel_and_failure(
-                cold_stream,
-                event_channel,
-                terminalFailure,
-            )));
+            return Ok(self.decode_parent_stream(parent, result));
         }
 
         let response = super::ProviderHttp::post(&self.api_endpoint)
@@ -1105,38 +1154,71 @@ mod tests;
 #[path = "../../../../tests/DeepseekProviderMediaRoleTests.rs"]
 mod media_role_tests;
 
-/// DeepSeek's current and legacy tool-call container tokens.
-const CONTAINERS: [(&str, &str, &str); 8] = [
-    (
-        "<｜｜DSML｜｜calls>",
-        "</｜｜DSML｜｜calls>",
-        "｜｜DSML｜｜",
-    ),
-    (
-        "<｜｜DSML｜｜function_calls>",
-        "</｜｜DSML｜｜function_calls>",
-        "｜｜DSML｜｜",
-    ),
-    ("<||DSML||calls>", "</||DSML||calls>", "||DSML||"),
-    (
-        "<||DSML||function_calls>",
-        "</||DSML||function_calls>",
-        "||DSML||",
-    ),
-    ("<｜DSML｜calls>", "</｜DSML｜calls>", "｜DSML｜"),
-    (
-        "<｜DSML｜function_calls>",
-        "</｜DSML｜function_calls>",
-        "｜DSML｜",
-    ),
-    ("<|DSML|calls>", "</|DSML|calls>", "|DSML|"),
-    (
-        "<|DSML|function_calls>",
-        "</|DSML|function_calls>",
-        "|DSML|",
-    ),
+/// DeepSeek's current and legacy tool-call namespaces and container names.
+const CONTAINERS: [(&str, &str); 8] = [
+    ("｜｜DSML｜｜", "calls"),
+    ("｜｜DSML｜｜", "function_calls"),
+    ("||DSML||", "calls"),
+    ("||DSML||", "function_calls"),
+    ("｜DSML｜", "calls"),
+    ("｜DSML｜", "function_calls"),
+    ("|DSML|", "calls"),
+    ("|DSML|", "function_calls"),
 ];
-const MAX_OPENING_LEN: usize = "<｜｜DSML｜｜function_calls>".len();
+
+/// Matches a DSML tag name with optional whitespace after its namespace.
+fn dsml_tag_rest<'a>(
+    text: &'a str,
+    namespace: &str,
+    name: &str,
+    closing: bool,
+) -> Option<&'a str> {
+    let prefix = if closing {
+        format!("</{namespace}")
+    } else {
+        format!("<{namespace}")
+    };
+    text.strip_prefix(&prefix)?
+        .trim_start()
+        .strip_prefix(name)
+        .filter(|rest| rest.starts_with('>') || rest.starts_with(char::is_whitespace))
+}
+
+/// Measures one complete attribute-free DSML tag at the start of the text.
+fn dsml_tag_end(text: &str, namespace: &str, name: &str, closing: bool) -> Option<usize> {
+    let tail = dsml_tag_rest(text, namespace, name, closing)?
+        .trim_start()
+        .strip_prefix('>')?;
+    Some(text.len() - tail.len())
+}
+
+/// Finds a complete attribute-free DSML tag without altering parameter text.
+fn find_dsml_tag(
+    text: &str,
+    namespace: &str,
+    name: &str,
+    closing: bool,
+) -> Option<(usize, usize)> {
+    text.match_indices('<').find_map(|(offset, _)| {
+        dsml_tag_end(&text[offset..], namespace, name, closing).map(|length| (offset, offset + length))
+    })
+}
+
+/// Retains incomplete opening tags even when whitespace spans multiple deltas.
+fn is_partial_dsml_opening(text: &str, namespace: &str, name: &str) -> bool {
+    let prefix = format!("<{namespace}");
+    if prefix.starts_with(text) {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix(&prefix) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    name.starts_with(rest)
+        || rest
+            .strip_prefix(name)
+            .is_some_and(|tail| tail.trim_start().is_empty())
+}
 
 /// Converts DeepSeek content into Operit markup without exposing partial DSML blocks.
 #[derive(Clone, Default)]
@@ -1153,15 +1235,15 @@ impl DeepseekDsmlDecoder {
         let mut output = String::new();
         loop {
             if let Some(index) = self.container {
-                let (_, closing, namespace) = CONTAINERS[index];
-                let Some(end) = self.pending.find(closing) else {
+                let (namespace, name) = CONTAINERS[index];
+                let Some((end, consumed)) = find_dsml_tag(&self.pending, namespace, name, true) else {
                     break;
                 };
                 let calls = parse_calls(&self.pending[..end], namespace)?;
                 output.push_str(&StructuredToolCallBridge::convertToolCallPayloadToXml(
                     &Value::Array(calls).to_string(),
                 ));
-                self.pending.drain(..end + closing.len());
+                self.pending.drain(..consumed);
                 self.container = None;
                 continue;
             }
@@ -1171,29 +1253,27 @@ impl DeepseekDsmlDecoder {
             } else {
                 "<think>"
             };
-            let tokens = CONTAINERS
+            let opening = CONTAINERS
                 .iter()
-                .map(|(token, _, _)| *token)
                 .enumerate()
                 .filter(|_| !self.reasoning)
-                .chain(std::iter::once((CONTAINERS.len(), reasoning_tag)))
-                .collect::<Vec<_>>();
-            let opening = tokens
-                .iter()
-                .filter_map(|(index, token)| {
-                    self.pending.find(token).map(|offset| (offset, *index))
+                .filter_map(|(index, (namespace, name))| {
+                    find_dsml_tag(&self.pending, namespace, name, false)
+                        .map(|(offset, consumed)| (offset, index, consumed))
                 })
-                .min_by_key(|(offset, _)| *offset);
-            if let Some((offset, index)) = opening {
+                .chain(self.pending.find(reasoning_tag).map(|offset| {
+                    (offset, CONTAINERS.len(), offset + reasoning_tag.len())
+                }))
+                .min_by_key(|(offset, _, _)| *offset);
+            if let Some((offset, index, consumed)) = opening {
                 output.push_str(&self.pending[..offset]);
                 if index == CONTAINERS.len() {
                     output.push_str(reasoning_tag);
-                    self.pending.drain(..offset + reasoning_tag.len());
                     self.reasoning = !self.reasoning;
                 } else {
-                    self.pending.drain(..offset + CONTAINERS[index].0.len());
                     self.container = Some(index);
                 }
+                self.pending.drain(..consumed);
                 continue;
             }
 
@@ -1202,15 +1282,16 @@ impl DeepseekDsmlDecoder {
                 .pending
                 .char_indices()
                 .rev()
-                .take_while(|(offset, _)| self.pending.len() - offset < MAX_OPENING_LEN)
-                .filter_map(|(offset, _)| {
+                .filter(|(_, ch)| *ch == '<')
+                .find_map(|(offset, _)| {
                     let suffix = &self.pending[offset..];
-                    tokens
-                        .iter()
-                        .any(|(_, token)| token.starts_with(suffix))
-                        .then_some(suffix.len())
+                    (reasoning_tag.starts_with(suffix)
+                        || (!self.reasoning
+                            && CONTAINERS.iter().any(|(namespace, name)| {
+                                is_partial_dsml_opening(suffix, namespace, name)
+                            })))
+                    .then_some(suffix.len())
                 })
-                .max()
                 .unwrap_or(0);
             let emitted = self.pending.len() - retained;
             output.push_str(&self.pending[..emitted]);
@@ -1225,7 +1306,7 @@ impl DeepseekDsmlDecoder {
         if self.container.is_some()
             || CONTAINERS
                 .iter()
-                .any(|(_, _, namespace)| self.pending.starts_with(&format!("<{namespace}")))
+                .any(|(namespace, _)| self.pending.starts_with(&format!("<{namespace}")))
         {
             return Err(invalid_dsml("incomplete tool-call container"));
         }
@@ -1247,12 +1328,8 @@ impl DeepseekDsmlDecoder {
 /// Parses all invocations before producing executable markup for one container.
 fn parse_calls(mut body: &str, namespace: &str) -> Result<Vec<Value>, AiServiceError> {
     let mut calls = Vec::new();
-    let invoke_open = format!("<{namespace}invoke");
-    let invoke_close = format!("</{namespace}invoke>");
-    let parameter_open = format!("<{namespace}parameter");
-    let parameter_close = format!("</{namespace}parameter>");
     while !body.trim_start().is_empty() {
-        let attributes = consume_opening(&mut body, &invoke_open)?;
+        let attributes = consume_opening(&mut body, namespace, "invoke")?;
         let name = required_attribute(&attributes, "name")?;
         if attributes.len() != 1 {
             return Err(invalid_dsml("unexpected invocation attribute"));
@@ -1260,18 +1337,17 @@ fn parse_calls(mut body: &str, namespace: &str) -> Result<Vec<Value>, AiServiceE
         let mut arguments = Map::new();
         loop {
             body = body.trim_start();
-            if let Some(rest) = body.strip_prefix(&invoke_close) {
-                body = rest;
+            if let Some(consumed) = dsml_tag_end(body, namespace, "invoke", true) {
+                body = &body[consumed..];
                 break;
             }
-            let attributes = consume_opening(&mut body, &parameter_open)?;
+            let attributes = consume_opening(&mut body, namespace, "parameter")?;
             let key = required_attribute(&attributes, "name")?;
             let is_string = required_attribute(&attributes, "string")?;
             if attributes.len() != 2 {
                 return Err(invalid_dsml("unexpected parameter attribute"));
             }
-            let end = body
-                .find(&parameter_close)
+            let (end, consumed) = find_dsml_tag(body, namespace, "parameter", true)
                 .ok_or_else(|| invalid_dsml("missing parameter closing token"))?;
             let raw = &body[..end];
             let value = match is_string {
@@ -1287,7 +1363,7 @@ fn parse_calls(mut body: &str, namespace: &str) -> Result<Vec<Value>, AiServiceE
             if arguments.insert(key.to_string(), value).is_some() {
                 return Err(invalid_dsml("duplicate parameter name"));
             }
-            body = &body[end + parameter_close.len()..];
+            body = &body[consumed..];
         }
         calls.push(json!({
             "type": "function",
@@ -1303,13 +1379,12 @@ fn parse_calls(mut body: &str, namespace: &str) -> Result<Vec<Value>, AiServiceE
 /// Consumes one opening token and its quoted attributes using the DSML grammar.
 fn consume_opening<'a>(
     body: &mut &'a str,
-    token: &str,
+    namespace: &str,
+    name: &str,
 ) -> Result<Map<String, Value>, AiServiceError> {
-    let rest = body
-        .trim_start()
-        .strip_prefix(token)
+    let rest = dsml_tag_rest(body.trim_start(), namespace, name, false)
         .filter(|rest| rest.starts_with(char::is_whitespace))
-        .ok_or_else(|| invalid_dsml(&format!("expected {token}")))?;
+        .ok_or_else(|| invalid_dsml(&format!("expected <{namespace}{name}")))?;
     let mut rest = rest.trim_start();
     let mut attributes = Map::new();
     loop {
@@ -1387,6 +1462,51 @@ mod dsml_tests {
         "</｜｜DSML｜｜calls>"
     );
 
+    /// Replays a disconnected native tool delta, its retry and a later final response through production decoding.
+    #[tokio::test]
+    async fn retry_rolls_back_partial_tool_markup_before_later_rounds() {
+        use crate::chat::llmprovider::AIService::SharedAiResponseStream;
+        use operit_model::MessagePartCodec::{AssistantMarkupStreamState, MessagePartCodec};
+        use operit_util::stream::HotStream::mutable_shared_stream;
+        use operit_util::stream::RevisableTextStream::{ResponseStreamItem, TextStreamEvent, TextStreamEventType};
+        use operit_util::stream::TextStreamRevisionTracker::TextStreamRevisionTracker;
+        let provider = DeepseekProvider::new("https://fixture.invalid/chat/completions".into(), "".into(), "deepseek-v4-flash".into(), "DEEPSEEK".into(), vec![], false, false, false, vec![], true, test_runtime_context());
+        let parent = SharedAiResponseStream::new_ordered(mutable_shared_stream(usize::MAX), mutable_shared_stream(usize::MAX));
+        let output = provider.decode_parent_stream(provider.open_ai_parent(false), Box::new(parent.clone()));
+        let mut output = output;
+        let mut tracker = TextStreamRevisionTracker::new("");
+        let (begun, started) = tokio::sync::oneshot::channel();
+        let mut begun = Some(begun);
+        let collect = async {
+            output.collect_ordered(&mut |item| match item {
+                ResponseStreamItem::Chunk(chunk) => {
+                    tracker.append(&chunk);
+                    if let Some(begun) = begun.take() { let _ = begun.send(()); }
+                }
+                ResponseStreamItem::Revision(event) => match event.event_type {
+                    TextStreamEventType::Savepoint => tracker.savepoint(&event.id),
+                    TextStreamEventType::Rollback => { tracker.rollback(&event.id).expect("Retry savepoint must reach the message consumer"); }
+                },
+            }).await;
+            assert_eq!(output.terminal_failure(), None);
+        };
+        let drive = async {
+            parent.emit_revision(TextStreamEvent { event_type: TextStreamEventType::Savepoint, id: "attempt".into() });
+            parent.emit_chunk("<tool_abandoned name=\"write_file\"><param name=\"content\">partial".into());
+            started.await.unwrap();
+            parent.emit_revision(TextStreamEvent { event_type: TextStreamEventType::Rollback, id: "attempt".into() });
+            parent.emit_chunk("<tool_retry name=\"write_file\"><param name=\"content\">complete</param></tool_retry>".into());
+            parent.close();
+        };
+        futures_util::future::join(collect, drive).await;
+        let mut message = AssistantMarkupStreamState::new();
+        message.push(tracker.current_content()).unwrap();
+        message.push("<tool_result_retry name=\"write_file\" status=\"success\"><content>saved</content></tool_result_retry>最终结果已完成").unwrap();
+        let parts = message.finish().unwrap();
+        assert_eq!(MessagePartCodec::visibleText(&parts), "最终结果已完成");
+        assert!(!tracker.current_content().contains("abandoned"));
+    }
+
     /// Extracts semantic tool calls without depending on generated tag suffixes.
     fn decoded_calls(text: &str) -> (String, Vec<Value>) {
         let (visible, calls) = StructuredToolCallBridge::parseXmlToolCalls(text);
@@ -1448,7 +1568,9 @@ mod dsml_tests {
     /// Covers both DSML container generations and their ASCII token spelling.
     #[test]
     fn container_spellings_and_multiple_invocations_are_supported() {
-        for (opening, closing, namespace) in CONTAINERS {
+        for (namespace, name) in CONTAINERS {
+            let opening = format!("<{namespace}{name}>");
+            let closing = format!("</{namespace}{name}>");
             let body = format!(
                 "<{namespace}invoke name='first'></{namespace}invoke>\n<{namespace}invoke name=\"second\"></{namespace}invoke>"
             );
@@ -1460,6 +1582,81 @@ mod dsml_tests {
                 .collect::<Vec<_>>();
             assert_eq!(names, ["first", "second", "first", "second"]);
         }
+    }
+
+    /// Converts spaced body tags and both file-info calls across every stream boundary.
+    #[test]
+    fn spaced_body_file_info_calls_are_executable() {
+        let source = concat!(
+            "Before<｜DSML｜ calls>\n",
+            "<｜DSML｜ invoke name=\"file_info\">\n",
+            "<｜DSML｜ parameter name=\"path\" string=\"true\">api_list.md</｜DSML｜ parameter>\n",
+            "</｜DSML｜ invoke>\n",
+            "<｜DSML｜ invoke name=\"file_info\">\n",
+            "<｜DSML｜ parameter name=\"path\" string=\"true\">api_list.json</｜DSML｜ parameter>\n",
+            "</｜DSML｜ invoke>\n",
+            "</｜DSML｜ calls>After"
+        );
+        for (offset, _) in source.char_indices() {
+            let output =
+                DeepseekDsmlDecoder::decode([&source[..offset], &source[offset..]]).unwrap();
+            let (visible, calls) = decoded_calls(&output);
+            assert!(visible.starts_with("Before"), "split at {offset}");
+            assert!(visible.ends_with("After"), "split at {offset}");
+            assert_eq!(calls.len(), 2, "split at {offset}");
+            for (call, path) in calls.iter().zip(["api_list.md", "api_list.json"]) {
+                assert_eq!(call["function"]["name"], "file_info");
+                let arguments: Value =
+                    serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+                assert_eq!(arguments, json!({"path": path}));
+            }
+        }
+        let pieces = source
+            .char_indices()
+            .map(|(offset, ch)| &source[offset..offset + ch.len_utf8()]);
+        assert_eq!(
+            decoded_calls(&DeepseekDsmlDecoder::decode(pieces).unwrap())
+                .1
+                .len(),
+            2
+        );
+    }
+
+    /// Accepts independent tag whitespace while preserving literal parameter bytes.
+    #[test]
+    fn tag_whitespace_does_not_rewrite_parameter_values() {
+        for (namespace, name) in CONTAINERS {
+            let literal = format!("  <{namespace} calls>\nunchanged &amp;  ");
+            let source = format!(
+                "<{namespace}\n\t{name} >\
+                 <{namespace}invoke name='file_info'>\
+                 <{namespace}\tparameter name='path' string='true'>{literal}</{namespace}\n parameter >\
+                 </{namespace} invoke >\
+                 </{namespace}\t{name}\n>"
+            );
+            let pieces = source
+                .char_indices()
+                .map(|(offset, ch)| &source[offset..offset + ch.len_utf8()]);
+            let output = DeepseekDsmlDecoder::decode(pieces).unwrap();
+            let calls = decoded_calls(&output).1;
+            assert_eq!(calls.len(), 1);
+            let arguments: Value =
+                serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["path"], literal);
+        }
+    }
+
+    /// Rejects truncated spaced containers without accepting tag-name prefixes.
+    #[test]
+    fn spaced_container_boundaries_are_strict() {
+        for source in ["<｜DSML｜ calls", "<｜DSML｜ \n", "<｜DSML｜ calls>"] {
+            assert!(DeepseekDsmlDecoder::decode([source]).is_err());
+        }
+        for source in ["<｜DSML｜ calls_extra>", "<｜DSML｜ calls invalid>"] {
+            assert_eq!(DeepseekDsmlDecoder::decode([source]).unwrap(), source);
+        }
+        let source = "<｜DSML｜ calls><｜DSML｜ invoke name='file_info'></｜DSML｜ invoke_extra></｜DSML｜ calls>";
+        assert!(DeepseekDsmlDecoder::decode([source]).is_err());
     }
 
     /// Preserves raw string bytes and parses explicitly nonstring values as strict JSON.
@@ -1589,7 +1786,10 @@ mod dsml_tests {
                 test_runtime_context(),
             );
             let reasoning = format!("Reasoning example: {SCREENSHOT_CALL}");
-            let content = format!("Before{SCREENSHOT_CALL}After");
+            let content = format!(
+                "Before{}After",
+                SCREENSHOT_CALL.replace("DSML｜｜", "DSML｜｜ ")
+            );
             let response = if responses {
                 json!({"output": [
                     {"type": "reasoning", "content": [{"type": "reasoning_text", "text": reasoning}]},

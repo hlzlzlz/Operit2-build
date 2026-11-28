@@ -109,6 +109,57 @@ function adapter(version = '1.0.0', respond) {
   return { context, calls, canonicalCalls };
 }
 
+/** Keeps the retired search identity scoped to v1 raw call compatibility. */
+test('v1 raw intent search preserves overloads and leaves v2 calls unchanged', async () => {
+  const runtime = adapter('1.0.0', async () => ({ totalMatches: 0, matches: [] }));
+  for (const version of ['1.0.0', '1.0.1']) {
+    runtime.context.version = version;
+    for (const expression of [
+      "toolCall('grep_context',{path:'/virtual/linux/app',intent:'text',max_results:3})",
+      "toolCall('default','grep_context',{path:'/virtual/linux/app',intent:'text',max_results:3})",
+      "toolCall({name:'grep_context',params:{path:'/virtual/linux/app',intent:'text',max_results:3}})",
+    ]) {
+      await vm.runInContext(expression, runtime.context);
+      assert.equal(runtime.calls.at(-1).name, 'grep_code');
+      assert.deepEqual(runtime.calls.at(-1).params, {
+        path: '/virtual/linux/app', pattern: 'text', case_insensitive: true, context_lines: 8, max_results: 3,
+      });
+    }
+  }
+  runtime.context.version = '2.0.0';
+  await vm.runInContext("toolCall('grep_context',{path:'/virtual/linux/app',intent:'text'})", runtime.context);
+  assert.equal(runtime.calls.at(-1).name, 'grep_context');
+});
+
+/** Keeps all historical raw call overloads working without registering a v2 alias. */
+test('browser dialog v1 raw calls translate actions and preserve the v1 receipt', async () => {
+  const runtime = adapter('1.0.0', async () => '{"dialog":null}');
+  for (const version of ['1.0.0', '1.0.1']) {
+    runtime.context.version = version;
+    for (const [expression, expected] of [
+      ["toolCall('browser_handle_dialog', {accept:true,promptText:''})", { action: 'accept', promptText: '' }],
+      ["toolCall('default','browser_handle_dialog',{accept:false,promptText:'ignored'})", { action: 'dismiss' }],
+      ["toolCall({name:'browser_handle_dialog',params:{accept:'true',promptText:'  雪  '}})", { action: 'accept', promptText: '  雪  ' }],
+    ]) {
+      assert.equal(await vm.runInContext(expression, runtime.context), 'OK');
+      assert.equal(runtime.calls.at(-1).name, 'browser_dialog');
+      assert.deepEqual(runtime.calls.at(-1).params, expected);
+    }
+  }
+  runtime.context.version = '2.0.0';
+  await vm.runInContext("toolCall('browser_handle_dialog',{accept:true})", runtime.context);
+  assert.equal(runtime.calls.at(-1).name, 'browser_handle_dialog');
+});
+
+/** Preserves host failures rather than returning the historical success text. */
+test('browser dialog v1 errors propagate and invalid booleans never reach the host', async () => {
+  const failure = adapter('1.0.0', async () => { throw new Error('No active browser dialog'); });
+  await assert.rejects(vm.runInContext("toolCall('browser_handle_dialog',{accept:true})", failure.context), /No active browser dialog/);
+  const runtime = adapter();
+  await assert.rejects(vm.runInContext("toolCall('browser_handle_dialog',{accept:'yes'})", runtime.context), /boolean accept/);
+  assert.equal(runtime.calls.length, 0);
+});
+
 /** Verifies internal state selection has explicit native and managed interpreter policies. */
 test('internal v1 compatibility selects Windows, Linux and OHOS policies and APK shims', async () => {
   assert.equal(existsSync(join(root, 'plugins/packages/buildin/v1_runtime.ts')), false);

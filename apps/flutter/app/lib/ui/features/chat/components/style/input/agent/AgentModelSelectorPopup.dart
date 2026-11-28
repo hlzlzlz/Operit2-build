@@ -12,6 +12,7 @@ import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import '../../../../../../../l10n/generated/app_localizations.dart';
 import '../../../../../../common/ThinkingLevelText.dart';
+import '../../../../../../common/ModelDisplayName.dart';
 import '../../../../../../common/contributions/ChatModelSelection.dart';
 import '../../../../../../common/contributions/ToolPkgChatUiCatalog.dart';
 import '../../../../viewmodel/ChatViewModel.dart';
@@ -424,7 +425,7 @@ class _AgentModelMenuSectionState extends State<AgentModelMenuSection> {
             _SettingsHeaderRow(
               icon: Icons.data_object_outlined,
               title: '模型',
-              value: data.currentBinding.modelId,
+              value: formatModelDisplayName(data.currentBinding.modelId),
               expanded: _modelSectionExpanded,
               onTap: () {
                 setState(() {
@@ -930,7 +931,7 @@ class _BoundModelSelection extends StatelessWidget {
             Text(
               '${participant.name} · ${participant.followsGlobal ? '跟随全局' : '固定模型'}',
             ),
-            Text(participant.binding.modelId),
+            Text(formatModelDisplayName(participant.binding.modelId)),
             Text(
               providers
                       .where(
@@ -1158,7 +1159,7 @@ class _ModelSelectorItem extends StatelessWidget {
           _SettingsHeaderRow(
             icon: headerIcon,
             title: headerTitle,
-            value: currentBinding.modelId,
+            value: formatModelDisplayName(currentBinding.modelId),
             expanded: expanded,
             onTap: () => onExpandedChanged(!expanded),
             onInfoClick: onInfoClick,
@@ -1571,7 +1572,7 @@ class _CurrentModelLine extends StatelessWidget {
                   Flexible(
                     flex: 3,
                     child: Text(
-                      model.id,
+                      formatModelDisplayName(model.id),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: textTheme.bodySmall!.copyWith(
@@ -1672,7 +1673,7 @@ class _ModelNameRow extends StatelessWidget {
           children: <Widget>[
             Expanded(
               child: Text(
-                model.id,
+                formatModelDisplayName(model.id),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: textTheme.labelSmall!.copyWith(
@@ -1732,7 +1733,7 @@ List<Widget> _modelMetaChips(
   BuildContext context,
   core_proxy.ProviderModelSummary? summary,
 ) {
-  final contextLabel = _formatContextChip(summary?.context.maxContextLength);
+  final contextLabel = _formatContextChip(summary?.context.maxContextTokens);
   final chips = <Widget>[
     if (summary?.capabilities.directImage == true)
       const _ModelMetaChip(label: '视觉', outlined: true),
@@ -1752,20 +1753,19 @@ List<Widget> _modelMetaChips(
 }
 
 /// Formats a context length token count as a compact chip label.
-String? _formatContextChip(double? length) {
-  if (length == null || length <= 0) {
+String? _formatContextChip(int? maxContextTokens) {
+  if (maxContextTokens == null || maxContextTokens <= 0) {
     return null;
   }
-  final k = length >= 10000 ? length / 1000.0 : length;
-  if (k >= 950) {
-    final millions = k / 1000.0;
+  if (maxContextTokens >= 950000) {
+    final millions = maxContextTokens / 1000000.0;
     final millionsRounded = millions.round();
     if ((millions - millionsRounded).abs() < 0.08) {
       return '${millionsRounded}M';
     }
     return '${millions.toStringAsFixed(1)}M';
   }
-  return '${k.round()}K';
+  return '${(maxContextTokens / 1000).round()}K';
 }
 
 class _SettingsHeaderRow extends StatelessWidget {

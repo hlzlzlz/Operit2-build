@@ -21,6 +21,7 @@ use operit_providers::chat::llmprovider::MediaLinkParser::MediaLinkParser;
 use operit_providers::chat::EnhancedAIService::{
     ChatGuidanceInbox, EnhancedAIService, MessageCancellationToken, ResumeRequest,
     SendMessageCallbacks, SendMessageOptions, SendMessageRuntime,
+    SummaryConversationOptions,
 };
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
@@ -63,6 +64,7 @@ pub struct BuildUserMessageContentRequest {
 }
 
 pub struct SendMessageRequest<'a> {
+    pub cancellationToken: MessageCancellationToken,
     pub chatConfiguration: ChatConfigurationResult,
     pub enhancedAiService: &'a mut EnhancedAIService,
     pub guidanceInbox: Option<ChatGuidanceInbox>,
@@ -320,7 +322,10 @@ impl AIMessageManager {
             Some(chatId) => chatId.clone(),
             None => DEFAULT_CHAT_KEY.to_string(),
         };
-        let cancellationToken = MessageCancellationToken::default();
+        let cancellationToken = request.cancellationToken;
+        if cancellationToken.isCancelled() {
+            return Err(AiServiceError::RequestCancelled);
+        }
         let operationId = activeChatOperations()
             .lock()
             .expect("active chat operations mutex poisoned")
@@ -354,18 +359,10 @@ impl AIMessageManager {
         };
 
         let apiPreferences = ApiPreferences::getInstance();
-        let maxImageHistoryUserTurns = apiPreferences
-            .maxImageHistoryUserTurnsFlow()
-            .first()
-            .unwrap_or(2);
-        let maxMediaHistoryUserTurns = apiPreferences
-            .maxMediaHistoryUserTurnsFlow()
-            .first()
-            .unwrap_or(1);
         let memoryAfterImageLimit =
-            Self::limitImageLinksInChatHistory(memory, maxImageHistoryUserTurns);
+            Self::limitImageLinksInChatHistory(memory, i32::MAX);
         let memoryForRequest =
-            Self::limitMediaLinksInChatHistory(memoryAfterImageLimit, maxMediaHistoryUserTurns);
+            Self::limitMediaLinksInChatHistory(memoryAfterImageLimit, i32::MAX);
 
         let pluginExecution = MessageProcessingPluginRegistry::createExecutionIfMatched(
             MessageProcessingHookParams {
@@ -535,6 +532,7 @@ impl AIMessageManager {
         autoContinue: bool,
         chatId: String,
         configuration: &ChatConfigurationResult,
+        options: SummaryConversationOptions,
         progress: Option<operit_providers::chat::enhance::ConversationService::SummaryProgressCallback>,
         trigger: Option<operit_providers::chat::enhance::ConversationService::SummaryTriggerContext>,
         onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
@@ -569,9 +567,11 @@ impl AIMessageManager {
             return Ok(None);
         }
 
+        // The model receives the ordinary structured history, including the previous checkpoint.
+        // Cleaning and condensing belong only to the display review appended after generation.
+        let conversationToSummarize = Self::getMemoryFromMessages(messages, configuration)?;
         let mut conversationReviewEntries = Vec::<(String, String)>::new();
-        let conversationToSummarize = messagesToSummarize.iter().enumerate().map(|(index, message)| {
-            let role = match message.sender.as_str() { "user" => "user", _ => "assistant" }.to_string();
+        for message in &messagesToSummarize {
             let cleanedContent = cleanSummarySourceMessage(message);
             if !cleanedContent.trim().is_empty() {
                 let displayContent = if message.sender == "ai" {
@@ -579,12 +579,11 @@ impl AIMessageManager {
                 } else { condenseUserForReview(&cleanedContent) };
                 conversationReviewEntries.push((summarySpeakerLabel(message), displayContent));
             }
-            (role, format!("#{}: {cleanedContent}", index + 1))
-        }).collect::<Vec<_>>();
+        }
 
         let startTime = ChatMessageTimestampAllocator::currentTimeMillis();
         let (summary, usage) = enhancedAiService
-            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration, progress, trigger, onNonFatalError)
+            .generateSummaryForConfiguration(conversationToSummarize, previousSummary, chatId, configuration, options, progress, trigger, onNonFatalError)
             .await?;
         let endTime = ChatMessageTimestampAllocator::currentTimeMillis();
         if summary.trim().is_empty() {
@@ -628,10 +627,22 @@ impl AIMessageManager {
     pub async fn calculateStableContextWindow(
         request: StableContextWindowRequest<'_>,
     ) -> Result<i64, operit_providers::chat::llmprovider::AIService::AiServiceError> {
+        let (windowSize, _) = Self::calculateStableContextWindowWithBreakdown(request).await?;
+        Ok(windowSize)
+    }
+
+    /// Calculates a stable context window and category breakdown with the complete workspace folder set.
+    #[allow(non_snake_case)]
+    pub async fn calculateStableContextWindowWithBreakdown(
+        request: StableContextWindowRequest<'_>,
+    ) -> Result<
+        (i64, Option<operit_model::ContextWindowBreakdown::ContextWindowBreakdown>),
+        operit_providers::chat::llmprovider::AIService::AiServiceError,
+    > {
         let memory = Self::getMemoryFromMessages(request.chatHistory, &request.runtime.chatConfiguration)?;
         request
             .enhancedAiService
-            .estimateRequestWindowFromMemory(
+            .estimateRequestWindowFromMemoryWithBreakdown(
                 request.messageContent,
                 memory,
                 request.chatId,
@@ -709,6 +720,23 @@ impl AIMessageManager {
             }
         }
         Ok(turns)
+    }
+
+    /// Accepts a completed source only when streaming added assistant segments to an unchanged base.
+    pub(crate) fn committedConversationContextSource(
+        messages: Vec<ChatMessage>,
+        configuration: &ChatConfigurationResult,
+        firstAssistantTimestamp: i64,
+        expectedBase: [u8; 32],
+    ) -> Result<Option<Vec<PromptTurn>>, AiServiceError> {
+        let base = Self::getMemoryFromMessages(messages.iter()
+            .filter(|message| message.timestamp < firstAssistantTimestamp).cloned().collect(), configuration)?;
+        let baseUnchanged = operit_providers::chat::enhance::ConversationContext::sourceFingerprint(&base) == expectedBase;
+        let onlyAssistantAdditions = messages.iter()
+            .filter(|message| message.timestamp >= firstAssistantTimestamp)
+            .all(|message| message.sender == "ai");
+        if !baseUnchanged || !onlyAssistantAdditions { return Ok(None); }
+        Self::getMemoryFromMessages(messages, configuration).map(Some)
     }
 
     /// Converts stored assistant parts into provider turns while preserving tool boundaries.
@@ -1030,14 +1058,15 @@ impl AIMessageManager {
             .count();
         let keepFromTurn = totalUserTurns.saturating_sub(limit);
 
-        let mut currentUserTurnIndex = usize::MAX;
+        let mut seenUserTurns = 0usize;
         history
             .into_iter()
             .map(|turn| {
                 if turn.kind == PromptTurnKind::USER {
-                    currentUserTurnIndex = currentUserTurnIndex.saturating_add(1);
+                    seenUserTurns += 1;
                 }
-                let shouldKeepMedia = limit > 0 && currentUserTurnIndex >= keepFromTurn;
+                let shouldKeepMedia = limit > 0
+                    && (seenUserTurns > keepFromTurn || (seenUserTurns == 0 && limit >= totalUserTurns));
                 if !shouldKeepMedia && MediaLinkParser::has_media_links(&turn.content) {
                     let removed = MediaLinkParser::remove_media_links(&turn.content)
                         .trim()
@@ -1066,14 +1095,15 @@ impl AIMessageManager {
             .count();
         let keepFromTurn = totalUserTurns.saturating_sub(limit);
 
-        let mut currentUserTurnIndex = usize::MAX;
+        let mut seenUserTurns = 0usize;
         history
             .into_iter()
             .map(|turn| {
                 if turn.kind == PromptTurnKind::USER {
-                    currentUserTurnIndex = currentUserTurnIndex.saturating_add(1);
+                    seenUserTurns += 1;
                 }
-                let shouldKeepImages = limit > 0 && currentUserTurnIndex >= keepFromTurn;
+                let shouldKeepImages = limit > 0
+                    && (seenUserTurns > keepFromTurn || (seenUserTurns == 0 && limit >= totalUserTurns));
                 if !shouldKeepImages && MediaLinkParser::has_image_links(&turn.content) {
                     let removed = MediaLinkParser::remove_image_links(&turn.content)
                         .trim()
@@ -1100,6 +1130,7 @@ impl AIMessageManager {
         Self::cancelOperation(chatKey).await
     }
 
+    /// Cancels the chat's registered send.
     #[allow(non_snake_case)]
     pub async fn cancelOperation(chatId: String) -> Result<(), AiServiceError> {
         let chatKey = if chatId.trim().is_empty() {
@@ -1483,6 +1514,30 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// Retains all history at the maximum limit and applies smaller limits by user turn.
+    #[test]
+    fn media_history_turn_limits_preserve_recent_turns() {
+        let content = "text <link type=\"image\" id=\"img\"/> <link type=\"audio\" id=\"aud\"/>";
+        let history = vec![
+            PromptTurn::new(PromptTurnKind::ASSISTANT, content.to_string()),
+            PromptTurn::new(PromptTurnKind::USER, content.to_string()),
+            PromptTurn::new(PromptTurnKind::ASSISTANT, content.to_string()),
+            PromptTurn::new(PromptTurnKind::USER, content.to_string()),
+            PromptTurn::new(PromptTurnKind::ASSISTANT, content.to_string()),
+        ];
+        let apply = |limit| {
+            AIMessageManager::limitMediaLinksInChatHistory(
+                AIMessageManager::limitImageLinksInChatHistory(history.clone(), limit),
+                limit,
+            )
+        };
+        assert!(apply(i32::MAX).iter().all(|turn| turn.content == content));
+        let limited = apply(1);
+        assert!(limited[..3].iter().all(|turn| turn.content == "text"));
+        assert!(limited[3..].iter().all(|turn| turn.content == content));
+        assert!(apply(0).iter().all(|turn| turn.content == "text"));
+    }
+
     /// Low context usage cannot trigger automatic summaries, even after many user turns.
     #[test]
     fn automatic_summary_requires_context_token_threshold() {
@@ -1508,6 +1563,34 @@ mod tests {
         })).unwrap();
         configuration.extensionOwner = "configuration-owner".into();
         configuration
+    }
+
+    /// Refuses to bind an in-flight request to a background checkpoint or edited source.
+    #[test]
+    fn summary_context_commit_rejects_history_changed_during_streaming() {
+        let configuration = historyConfiguration(false, false);
+        let mut user = ChatMessage::new_with_parts("user".into(), vec![MessagePart::markdown("user".into(), 0, "question".into())]);
+        user.timestamp = 10;
+        let base = AIMessageManager::getMemoryFromMessages(vec![user.clone()], &configuration).unwrap();
+        let digest = operit_providers::chat::enhance::ConversationContext::sourceFingerprint(&base);
+        let mut reply = ChatMessage::new_with_parts("ai".into(), vec![MessagePart::markdown("reply".into(), 0, "answer".into())]);
+        reply.timestamp = 20;
+        assert!(AIMessageManager::committedConversationContextSource(
+            vec![user.clone(), reply.clone()], &configuration, 20, digest,
+        ).unwrap().is_some());
+        let mut checkpoint = ChatMessage::new_with_parts("summary".into(), vec![MessagePart::markdown("checkpoint".into(), 0, "background summary".into())]);
+        checkpoint.timestamp = 15;
+        assert!(AIMessageManager::committedConversationContextSource(
+            vec![user.clone(), checkpoint.clone(), reply.clone()], &configuration, 20, digest,
+        ).unwrap().is_none());
+        checkpoint.timestamp = 21;
+        assert!(AIMessageManager::committedConversationContextSource(
+            vec![user.clone(), reply.clone(), checkpoint], &configuration, 20, digest,
+        ).unwrap().is_none());
+        user.parts[0].content = "edited question".into();
+        assert!(AIMessageManager::committedConversationContextSource(
+            vec![user, reply], &configuration, 20, digest,
+        ).unwrap().is_none());
     }
 
     /// Builds exact persisted authors independently of the current participant roster or display names.
@@ -1953,6 +2036,7 @@ mod cancellation_tests {
         assert_eq!(registry.take("second"), Some((secondId, "second-service")));
         assert!(registry.snapshot().is_empty());
     }
+
     #[test]
     fn output_attachment_uses_its_saved_vfs_locator_in_ai_metadata() {
         let mut attachment = AttachmentInfo::new("/device-a/output/report.md".into(), "report.md".into(), "text/markdown".into(), 12);

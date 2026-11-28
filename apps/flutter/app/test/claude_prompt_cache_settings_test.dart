@@ -53,7 +53,7 @@ void main() {
       final l10n = AppLocalizations.of(panelKey.currentContext!)!;
       await tester.tap(find.text('Test Provider'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('test-model').last);
+      await tester.tap(find.text('Test Model').last);
       await tester.pumpAndSettle();
       final cacheChip = find.text(l10n.settingsModelClaudeCache);
       if (providerType == core.ApiProviderType.openai) {
@@ -80,7 +80,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Test Provider'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('test-model').last);
+      await tester.tap(find.text('Test Model').last);
       await tester.pumpAndSettle();
       // Reloading the form must retain true; toggling now saves false.
       await tester.ensureVisible(cacheChip);
@@ -133,10 +133,11 @@ class _ClaudeSettingsBridge extends OperitRuntimeBridge {
     llamaKvUnified: false,
     llamaOffloadKqv: false,
   );
-  static const contextSpec = core.ModelContextSpec(maxContextLength: 200);
+  static const contextSpec = core.ModelContextSpec(maxContextTokens: 200_000);
 
   core.ModelProfile get model => core.ModelProfile(
     id: binding.modelId,
+    custom: false,
     pricingOverride: null,
     contextOverride: contextSpec,
     capabilitiesOverride: core.ModelCapabilityOverrides(

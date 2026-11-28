@@ -42,7 +42,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   static final WorkspaceBrowserViewStore instance =
       WorkspaceBrowserViewStore._();
 
-  static const String _homeUrl = 'https://www.bing.com';
+  static const String _homeUrl = 'about:blank';
   // Keep the workspace UI aligned with the host-owned WebView default.
   static const double _defaultZoomFactor = 0.4;
   static const double _minZoomFactor = 0.1;
@@ -186,9 +186,10 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
 
   /// Attaches an existing Core browser session to the workspace view.
   Future<WorkspaceBrowserTabState> attachSession(
-    RuntimeBrowserSessionInfo session,
-  ) {
-    return _attachSession(session, select: true);
+    RuntimeBrowserSessionInfo session, {
+    bool select = true,
+  }) {
+    return _attachSession(session, select: select);
   }
 
   /// Opens a runtime-owner local file session through Core.

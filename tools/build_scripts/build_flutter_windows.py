@@ -13,6 +13,7 @@ from common import (
     flutter_command,
     flutter_pub_get,
     generate_dart_proxy_artifacts,
+    prepare_plugin_assets,
     require_command,
     run,
 )
@@ -47,12 +48,13 @@ def parse_args() -> argparse.Namespace:
 # Builds the Windows Flutter app and writes its MSI installer.
 def main() -> int:
     args = parse_args()
+    prepare_plugin_assets(flutter_assets=True)
     flutter_pub_get(enforce_lockfile=args.enforce_lockfile)
     # lib/core/proxy/generated/*.g.dart is gitignored and produced by the local
-    # proxy crate's build script. The Android build already runs this through
-    # generate_dart_proxy_artifacts(); without it the Windows build fails with
-    # "RuntimeDeviceSpaceDevice isn't a type", because the UI imports generated
-    # proxy types that were never produced.
+    # proxy crate's build script. The Android, iOS and macOS entry points all run
+    # this through generate_dart_proxy_artifacts(); without it the Windows build
+    # fails with "RuntimeDeviceSpaceDevice isn't a type", because the UI imports
+    # generated proxy types that were never produced.
     generate_dart_proxy_artifacts()
     command = [flutter_command(), "build", "windows", "--release", "--no-pub"]
     if args.build_name:

@@ -19,7 +19,9 @@ use crate::chat::enhance::ConversationService::{
     PromptHistoryHookDispatcher, SystemPromptComposer, ToolExposureMode,
 };
 use crate::chat::enhance::MultiServiceManager::{MultiServiceManager, SharedAIServiceHandle};
+use crate::chat::enhance::ConversationContext::{ConversationContext, ConversationContextCache};
 use crate::chat::hooks::PromptHookRegistry::{PromptHookContext, PromptHookRegistry};
+use crate::chat::llmprovider::StructuredToolCallBridge::StructuredToolCallBridge;
 use crate::chat::llmprovider::ThinkingDialect::RequestThinking;
 use crate::chat::llmprovider::AIService::{
     ensure_response_completed, response_stream_from_chunks, AiServiceError, SendMessageRequest, SharedAiResponseStream,
@@ -32,6 +34,7 @@ use crate::runtime_support::{
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_link::CoreValue;
+use operit_model::ContextWindowBreakdown::ContextWindowBreakdown;
 use operit_model::FunctionType::FunctionType;
 use operit_model::InputProcessingState::InputProcessingState;
 use operit_model::ModelConfigData::ResolvedModelConfig;
@@ -39,6 +42,7 @@ use operit_model::ModelParameter::ModelParameter;
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_model::ToolPrompt::{ToolParameterSchema, ToolPrompt};
+use operit_model::ProviderQuota::{mask_api_key_fingerprint, UsageRequestStatus};
 use operit_store::repository::UsageStatisticsStore::UsageRequestSource;
 pub use super::TurnTokenUsage::TurnTokenSnapshot;
 use super::TurnTokenUsage::{RequestTokenUsage, TurnTokenUsage};
@@ -90,6 +94,7 @@ pub struct EnhancedAIService {
     pub tool_handler: AIToolHandler,
     pub input_processing_state: MutableStateFlow<InputProcessingState>,
     pub request_window_estimate_flow: MutableStateFlow<Option<i64>>,
+    pub request_window_breakdown_flow: MutableStateFlow<Option<ContextWindowBreakdown>>,
     pub api_preferences: ApiPreferencesMirror,
     pub tool_processing_scope: ToolProcessingScopeMirror,
     pub package_manager: PackageManagerMirror,
@@ -103,6 +108,7 @@ pub struct EnhancedAISharedState {
     pub responseRound: i32,
     pub turn_token_usage: TurnTokenUsage,
     pub request_window_estimate: Option<i64>,
+    pub request_window_breakdown: Option<ContextWindowBreakdown>,
     pub active_execution_contexts: BTreeMap<i32, MessageExecutionContext>,
     pub next_execution_context_id: i32,
     /// Invalidates sends that are still waiting to register their response task.
@@ -115,6 +121,8 @@ pub struct EnhancedAISharedState {
     pub last_turn_model_identity: Option<TurnModelIdentity>,
     pub last_turn_context_window: Option<i64>,
     pub pendingRouteChange: Option<RouteChangeIntent>,
+    /// Prepared history is reusable only after the application commits its source messages.
+    pub conversation_contexts: ConversationContextCache,
 }
 
 /// Display metadata captured from the resolved model configuration for one turn.
@@ -363,7 +371,6 @@ pub struct SendMessageOptions {
     pub enableThinking: bool,
     pub onNonFatalError: Option<fn(String)>,
     pub onTokenLimitExceeded: Option<fn()>,
-    pub customSystemPromptTemplate: Option<String>,
     pub isSubTask: bool,
     pub participantName: Option<String>,
     /// Explicit participant selected from a plugin-resolved execution plan.
@@ -386,6 +393,14 @@ pub struct ResumeRequest {
     pub options: SendMessageOptions,
 }
 
+/// Supplies ordinary chat preparation inputs for a conversation summary.
+#[derive(Clone, Debug)]
+pub struct SummaryConversationOptions {
+    pub workspacePath: Option<String>,
+    pub workspaceFolders: Vec<String>,
+    pub promptFunctionType: PromptFunctionType,
+}
+
 impl SendMessageOptions {
     /// Creates explicit send controls before the configuration owner supplies an execution profile.
     pub fn new() -> Self {
@@ -404,7 +419,6 @@ impl SendMessageOptions {
             enableThinking: false,
             onNonFatalError: None,
             onTokenLimitExceeded: None,
-            customSystemPromptTemplate: None,
             isSubTask: false,
             participantName: None,
             executionParticipantId: None,
@@ -743,10 +757,6 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
         use_english: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
-            let custom_system_prompt_template = match &request.custom_system_prompt_template {
-                Some(value) => value.clone(),
-                None => String::new(),
-            };
             let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
             // Use the same host-owned roots as file tools, not a guessed storage location.
             // Resolve afresh for every request so workspace switches cannot retain stale paths.
@@ -818,7 +828,6 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     workspace_path_mappings,
                     terminal_path_mappings,
                     use_english,
-                    custom_system_prompt_template,
                     enable_tools: true,
                     has_image_recognition: request.has_image_recognition,
                     chat_model_has_direct_image: request.chat_model_has_direct_image,
@@ -864,6 +873,7 @@ impl EnhancedAIService {
             tool_handler,
             input_processing_state: mutableStateFlow(InputProcessingState::Idle),
             request_window_estimate_flow: mutableStateFlow(None),
+            request_window_breakdown_flow: mutableStateFlow(None),
             api_preferences: ApiPreferencesMirror,
             tool_processing_scope: ToolProcessingScopeMirror,
             package_manager: PackageManagerMirror,
@@ -934,7 +944,20 @@ impl EnhancedAIService {
     }
 
     pub fn publishRequestWindowEstimate(&mut self, windowSize: i64) {
-        self.shared_state().request_window_estimate = Some(windowSize);
+        self.publishRequestWindowEstimateWithBreakdown(windowSize, None);
+    }
+
+    pub fn publishRequestWindowEstimateWithBreakdown(
+        &mut self,
+        windowSize: i64,
+        breakdown: Option<ContextWindowBreakdown>,
+    ) {
+        {
+            let mut shared = self.shared_state();
+            shared.request_window_estimate = Some(windowSize);
+            shared.request_window_breakdown = breakdown;
+        }
+        self.request_window_breakdown_flow.set_value(breakdown);
         self.request_window_estimate_flow
             .set_value(Some(windowSize));
     }
@@ -946,16 +969,36 @@ impl EnhancedAIService {
         availableTools: &[ToolPrompt],
         publishEstimate: bool,
     ) -> Result<i64, AiServiceError> {
+        let (windowSize, _) = self
+            .estimatePreparedRequestWindowWithBreakdown(
+                serviceForFunction,
+                preparedHistory,
+                availableTools,
+                publishEstimate,
+            )
+            .await?;
+        Ok(windowSize)
+    }
+
+    pub async fn estimatePreparedRequestWindowWithBreakdown(
+        &mut self,
+        serviceForFunction: SharedAIServiceHandle,
+        preparedHistory: &[PromptTurn],
+        availableTools: &[ToolPrompt],
+        publishEstimate: bool,
+    ) -> Result<(i64, Option<ContextWindowBreakdown>), AiServiceError> {
         let windowSize = {
             let service = serviceForFunction.lock().await;
             service
                 .calculate_input_tokens(preparedHistory, availableTools)
                 .await?
         };
+        let breakdown =
+            calculate_context_window_breakdown(preparedHistory, availableTools, windowSize);
         if publishEstimate {
-            self.publishRequestWindowEstimate(windowSize);
+            self.publishRequestWindowEstimateWithBreakdown(windowSize, breakdown);
         }
-        Ok(windowSize)
+        Ok((windowSize, breakdown))
     }
 
     /// Applies final prompt hooks and preserves execution failures for the caller.
@@ -980,8 +1023,15 @@ impl EnhancedAIService {
         enableThinking: bool,
         stream: bool,
         isSubTask: bool,
-    ) -> HashMap<String, Value> {
-        HashMap::from([
+    ) -> Result<HashMap<String, Value>, AiServiceError> {
+        let context = self.tool_handler.getContext();
+        let outputPath = match (context.runtimeStorageHost.as_ref(), chatId.as_deref()) {
+            (Some(storage), Some(chat)) => operit_store::ChatOutputStore::ChatOutputStore::new(storage.clone())
+                .directory(chat).map_err(AiServiceError::RequestFailed)?,
+            _ => None,
+        };
+        Ok(HashMap::from([
+            ("outputPath".to_string(), json!(outputPath)),
             ("workspacePath".to_string(), json!(workspacePath)),
             ("enableThinking".to_string(), json!(enableThinking)),
             ("stream".to_string(), json!(stream)),
@@ -991,7 +1041,7 @@ impl EnhancedAIService {
                 "executionContext".to_string(),
                 json!({ "chatId": chatId, "participantId": participantId }),
             ),
-        ])
+        ]))
     }
 
     /// Reconciles finalized input with the current user turn before counting or sending.
@@ -1017,7 +1067,6 @@ impl EnhancedAIService {
         workspacePath: Option<String>,
         workspaceFolders: Vec<String>,
         promptFunctionType: PromptFunctionType,
-        customSystemPromptTemplate: Option<String>,
         participantId: Option<String>,
         proxySenderName: Option<String>,
         isSubTask: bool,
@@ -1066,7 +1115,6 @@ impl EnhancedAIService {
                     workspace_folders: workspaceFolders,
                     prompt_function_type: prompt_function_type_name(&promptFunctionType)
                         .to_string(),
-                    custom_system_prompt_template: customSystemPromptTemplate,
                     participant_id: participantId,
                     proxy_sender_name: proxySenderName,
                     has_image_recognition: !isSubTask && runtime.hasImageRecognition,
@@ -1091,19 +1139,6 @@ impl EnhancedAIService {
             ConversationService::use_relative_attachment_paths(&mut history, &base);
         }
         Ok(history)
-    }
-
-    /// Generates a functional summary with an explicit retry-error consumer.
-    pub async fn generateSummary(
-        &mut self,
-        messages: Vec<(String, String)>,
-        previousSummary: Option<String>,
-        onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<String, AiServiceError> {
-        let mut multiServiceManager = self.multi_service_manager.clone();
-        self.conversation_service
-            .generateSummary(messages, previousSummary, &mut multiServiceManager, onNonFatalError)
-            .await
     }
 
     /// Prepares a text-only assistant reply through the real conversation prompt and accounting pipeline.
@@ -1165,37 +1200,123 @@ impl EnhancedAIService {
     /// Runs chat summaries under the already-selected native participant, including all plugin hooks.
     pub async fn generateSummaryForConfiguration(
         &mut self,
-        messages: Vec<(String, String)>,
+        messages: Vec<PromptTurn>,
         previousSummary: Option<String>,
         chatId: String,
         configuration: &ChatConfigurationResult,
+        options: SummaryConversationOptions,
         progress: Option<crate::chat::enhance::ConversationService::SummaryProgressCallback>,
         trigger: Option<crate::chat::enhance::ConversationService::SummaryTriggerContext>,
         onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<(String, TokenCounts), AiServiceError> {
+        let prepared = self.shared_state().conversation_contexts.get(
+            &chatId, &configuration.profile.id, &messages,
+        );
+        AppLogger::v_with_level(TAG, &format!(
+            "chat.summary.context chatId={} participantId={} reusedPreparedContext={} sourceTurns={}",
+            chatId, configuration.profile.id, prepared.is_some(), messages.len(),
+        ), operit_util::AppLogger::VERBOSE_LEVEL_2);
+        let prepared = match prepared {
+            Some(context) => context.as_ref().clone(),
+            None => self.prepareSummaryConversation(messages, &chatId, configuration, &options).await?,
+        };
         let context = toolRuntimeContextForConfiguration(
-            configuration, Some(chatId), None, Vec::new(), &ToolExposureMode::Full,
+            configuration, Some(chatId), options.workspacePath, options.workspaceFolders,
+            &ToolExposureMode::Full,
         )?;
         let mut manager = self.multi_service_manager.clone();
-        let turns = messages.into_iter().map(|(role, content)|
-            PromptTurn::new(PromptTurnKind::from_role(&role), content)
-        ).collect();
         ToolExecutionManager::scopeToolRuntimeContext(context,
-            self.conversation_service.generateSummaryWithProgress(turns, previousSummary, &mut manager, progress, trigger, onNonFatalError),
+            self.conversation_service.generateSummaryWithProgress(prepared, previousSummary, &mut manager, progress, trigger, onNonFatalError),
         ).await
     }
 
-    /// Summarizes prepared turns while preserving the caller's error notifications.
-    pub async fn generateSummaryFromPromptTurns(
+    /// Prepares uncached or historical sources through the ordinary chat prompt pipeline.
+    async fn prepareSummaryConversation(
         &mut self,
         messages: Vec<PromptTurn>,
-        previousSummary: Option<String>,
-        onNonFatalError: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<String, AiServiceError> {
-        let mut multiServiceManager = self.multi_service_manager.clone();
-        self.conversation_service
-            .generateSummaryFromPromptTurns(messages, previousSummary, &mut multiServiceManager, onNonFatalError)
-            .await
+        chatId: &str,
+        configuration: &ChatConfigurationResult,
+        options: &SummaryConversationOptions,
+    ) -> Result<ConversationContext, AiServiceError> {
+        let sendOptions = SendMessageOptions {
+            chatId: Some(chatId.to_string()),
+            workspacePath: options.workspacePath.clone(),
+            workspaceFolders: options.workspaceFolders.clone(),
+            promptFunctionType: options.promptFunctionType.clone(),
+            executionParticipantId: Some(configuration.profile.id.clone()),
+            ..SendMessageOptions::new()
+        };
+        let mut runtime = self.createSendMessageRuntime(&sendOptions, configuration.clone())?;
+        runtime.promptMetadata.insert("promptPreparationId".into(), uuid::Uuid::new_v4().to_string());
+        let history = self.prepareConversationHistory(
+            messages, String::new(), sendOptions.chatId.clone(), options.workspacePath.clone(),
+            options.workspaceFolders.clone(), options.promptFunctionType.clone(),
+            sendOptions.executionParticipantId.clone(), None, false, FunctionType::CHAT,
+            None, None, PromptPreparationPurpose::Send, &runtime,
+        ).await?;
+        let tools = self.composeAvailableTools(
+            FunctionType::CHAT, sendOptions.chatId.clone(), options.promptFunctionType.clone(),
+            options.workspacePath.clone(), options.workspaceFolders.clone(), &runtime,
+        ).await?;
+        let mut metadata = btree_to_value_map(&runtime.promptMetadata);
+        metadata.extend(self.buildPromptFinalizeMetadata(
+            sendOptions.chatId, sendOptions.executionParticipantId, options.workspacePath.clone(),
+            true, true, false,
+        )?);
+        let finalized = self.applyPromptFinalizeHooks(PromptHookContext {
+            stage: "before_finalize_prompt".into(), chat_id: Some(chatId.to_string()),
+            function_type: Some(function_type_name(&FunctionType::CHAT).into()),
+            prompt_function_type: Some(prompt_function_type_name(&options.promptFunctionType).into()),
+            raw_input: Some(String::new()), processed_input: Some(String::new()),
+            prepared_history: history,
+            model_parameters: serializePromptHookModelParameters(&runtime.modelParameters),
+            available_tools: serializePromptHookToolPrompts(&tools), metadata,
+            ..PromptHookContext::default()
+        }, PromptHookRegistry::dispatchPromptFinalizeHooks).await.map_err(AiServiceError::RequestFailed)?;
+        let finalized = self.applyPromptFinalizeHooks(PromptHookContext {
+            stage: "before_send_to_model".into(), ..finalized
+        }, PromptHookRegistry::dispatchPromptFinalizeHooks).await.map_err(AiServiceError::RequestFailed)?;
+        let processed = finalized.processed_input.ok_or_else(||
+            AiServiceError::RequestFailed("Summary preparation removed processed input".into()))?;
+        Ok(Self::conversationContext(
+            &runtime, self.applyFinalizedCurrentUserTurn(finalized.prepared_history, "", &processed),
+            tools, true,
+        ))
+    }
+
+    /// Captures model-facing history without recomposing prompts or stripping protocol metadata.
+    fn conversationContext(
+        runtime: &SendMessageRuntime,
+        history: Vec<PromptTurn>,
+        tools: Vec<ToolPrompt>,
+        enableThinking: bool,
+    ) -> ConversationContext {
+        ConversationContext {
+            history, available_tools: tools,
+            thinking: RequestThinking::for_model(
+                &runtime.modelConfig.thinking, runtime.modelConfig.thinkingLevel, enableThinking,
+            ),
+            model_parameters: runtime.modelParameters.clone(),
+            model_binding: runtime.chatConfiguration.profile.modelBinding.clone(),
+        }
+    }
+
+    /// Publishes completed context for the application's subsequent persistence acknowledgement.
+    fn recordConversationContext(
+        &self, chatId: Option<&str>, runtime: &SendMessageRuntime,
+        history: &[PromptTurn], tools: &[ToolPrompt], enableThinking: bool,
+    ) {
+        if let Some(chatId) = chatId {
+            self.shared_state().conversation_contexts.record(
+                chatId.to_string(), runtime.chatConfiguration.profile.id.clone(),
+                Self::conversationContext(runtime, history.to_vec(), tools.to_vec(), enableThinking),
+            );
+        }
+    }
+
+    /// Associates completed provider context with the exact persisted application history.
+    pub fn commitConversationContext(&self, chatId: &str, participantId: &str, source: Vec<PromptTurn>) {
+        self.shared_state().conversation_contexts.commit(chatId, participantId, source);
     }
 
     /// Generates a concise title using the model bound to title generation.
@@ -1303,8 +1424,44 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         publishEstimate: bool,
-        mut runtime: SendMessageRuntime,
+        runtime: SendMessageRuntime,
     ) -> Result<i64, AiServiceError> {
+        let (windowSize, _) = self
+            .estimateRequestWindowFromMemoryWithBreakdown(
+                message,
+                chatHistory,
+                chatId,
+                workspacePath,
+                workspaceFolders,
+                promptFunctionType,
+                participantId,
+                proxySenderName,
+                chatProviderIdOverride,
+                chatModelIdOverride,
+                publishEstimate,
+                runtime,
+            )
+            .await?;
+        Ok(windowSize)
+    }
+
+    /// Estimates the request window and category breakdown using the same workspace context as message sending.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn estimateRequestWindowFromMemoryWithBreakdown(
+        &mut self,
+        message: String,
+        chatHistory: Vec<PromptTurn>,
+        chatId: Option<String>,
+        workspacePath: Option<String>,
+        workspaceFolders: Vec<String>,
+        promptFunctionType: PromptFunctionType,
+        participantId: Option<String>,
+        proxySenderName: Option<String>,
+        chatProviderIdOverride: Option<String>,
+        chatModelIdOverride: Option<String>,
+        publishEstimate: bool,
+        mut runtime: SendMessageRuntime,
+    ) -> Result<(i64, Option<ContextWindowBreakdown>), AiServiceError> {
         let preparedHistory = self
             .prepareConversationHistory(
                 chatHistory,
@@ -1313,7 +1470,6 @@ impl EnhancedAIService {
                 workspacePath.clone(),
                 workspaceFolders.clone(),
                 promptFunctionType.clone(),
-                None,
                 participantId.clone(),
                 proxySenderName,
                 false,
@@ -1348,7 +1504,7 @@ impl EnhancedAIService {
             false,
             false,
             false,
-        ));
+        )?);
         let context = PromptHookContext {
             stage: "before_finalize_prompt".into(),
             chat_id: chatId,
@@ -1369,7 +1525,7 @@ impl EnhancedAIService {
         let preparedHistory = self.applyFinalizedCurrentUserTurn(
             finalized.prepared_history, &message, &processedInput,
         );
-        self.estimatePreparedRequestWindow(
+        self.estimatePreparedRequestWindowWithBreakdown(
             serviceForFunction,
             &preparedHistory,
             &availableTools,
@@ -1457,6 +1613,11 @@ impl EnhancedAIService {
     #[allow(non_snake_case)]
     pub fn requestWindowEstimateFlow(&self) -> MutableStateFlow<Option<i64>> {
         self.request_window_estimate_flow.clone()
+    }
+
+    #[allow(non_snake_case)]
+    pub fn requestWindowBreakdownFlow(&self) -> MutableStateFlow<Option<ContextWindowBreakdown>> {
+        self.request_window_breakdown_flow.clone()
     }
 
     /// Sends a user message through the prompt, provider, and tool loop.
@@ -1776,7 +1937,6 @@ impl EnhancedAIService {
         let enableThinking = options.enableThinking;
         let maxTokens = options.maxTokens;
         let tokenUsageThreshold = options.tokenUsageThreshold;
-        let customSystemPromptTemplate = options.customSystemPromptTemplate.clone();
         let isSubTask = options.isSubTask;
         let participantName = options.participantName.clone();
         let participantId = Some(runtime.chatConfiguration.profile.id.clone());
@@ -1824,7 +1984,6 @@ impl EnhancedAIService {
                 workspacePath.clone(),
                 options.workspaceFolders.clone(),
                 promptFunctionType.clone(),
-                customSystemPromptTemplate.clone(),
                 participantId.clone(),
                 proxySenderName.clone(),
                 isSubTask,
@@ -1926,7 +2085,7 @@ impl EnhancedAIService {
             enableThinking,
             stream,
             isSubTask,
-        ));
+        )?);
         let beforeFinalizeContext = self
             .applyPromptFinalizeHooks(
                 PromptHookContext {
@@ -2039,6 +2198,12 @@ impl EnhancedAIService {
                 &execContext, serviceForFunction.clone(), functionType.clone(),
                 UsageRequestSource::CHAT_RESPONSE, chatId.clone(),
             )?;
+            tokenRequest.setAttribution(
+                stream,
+                runtime.modelConfig.providerId.clone(),
+                String::new(),
+                mask_api_key_fingerprint(&runtime.modelConfig.apiKey),
+            );
             service
                 .send_message(SendMessageRequest {
                     chat_history: requestHistory.clone(),
@@ -2060,6 +2225,11 @@ impl EnhancedAIService {
         let mut provider_stream = match providerResult {
             Ok(stream) => stream,
             Err(error) => {
+                tokenRequest.markStatus(if matches!(error, AiServiceError::RequestCancelled) {
+                    UsageRequestStatus::CANCELLED
+                } else {
+                    UsageRequestStatus::FAILED
+                });
                 turnUsage.finishRequest(&tokenRequest, runtimeSupport.as_ref()).await?;
                 self.invalidateExecutionContext(
                     &mut execContext,
@@ -2116,6 +2286,9 @@ impl EnhancedAIService {
                             )),
                         );
                     }
+                    if !content.is_empty() {
+                        tokenRequest.markFirstOutput();
+                    }
                     let _ = responseRevisions.append(&content);
                     chunkCount += 1;
                     totalChars += content.len() as i32;
@@ -2159,6 +2332,11 @@ impl EnhancedAIService {
                 }
             })
             .await;
+        if !self.isExecutionContextActive(&execContext) {
+            tokenRequest.markStatus(UsageRequestStatus::CANCELLED);
+        } else if provider_stream.terminal_failure().is_some() {
+            tokenRequest.markStatus(UsageRequestStatus::FAILED);
+        }
         let tokens = turnUsage.finishRequest(&tokenRequest, runtimeSupport.as_ref()).await?;
         if !self.isExecutionContextActive(&execContext) {
             self.unregisterExecutionContext(&execContext);
@@ -2279,13 +2457,13 @@ impl EnhancedAIService {
             || execContext.roundManager.getCurrentRoundContent(),
         );
         let contextWindowStart = runtimeSupport.messageTimingNow();
-        let completedContextWindow = match self.estimatePreparedRequestWindow(
+        let completedContextWindow = match self.estimatePreparedRequestWindowWithBreakdown(
             runtime.aiService.clone(),
             &execContext.conversationHistory,
             &preparedRequest.availableTools,
             false,
         ).await {
-            Ok(windowSize) => Some(windowSize),
+            Ok((windowSize, breakdown)) => Some((windowSize, breakdown)),
             Err(error) => {
                 AppLogger::w(TAG, &format!("Completed request window estimate failed: {error}"));
                 None
@@ -2297,8 +2475,14 @@ impl EnhancedAIService {
             self.unregisterExecutionContext(&execContext);
             return Ok(());
         }
-        if let Some(windowSize) = completedContextWindow {
-            self.publishRequestWindowEstimate(windowSize);
+        if let Some((windowSize, breakdown)) = completedContextWindow {
+            self.publishRequestWindowEstimateWithBreakdown(windowSize, breakdown);
+        }
+        if !isSubTask && !runtime.textOnly {
+            self.recordConversationContext(
+                chatId.as_deref(), &runtime, &execContext.conversationHistory,
+                &preparedRequest.availableTools, enableThinking,
+            );
         }
         AppLogger::v_with_level(TAG, &format!(
             "completed request window from prepared state chatId={} executionId={} elapsedMs={} success={}",
@@ -2323,7 +2507,8 @@ impl EnhancedAIService {
         {
             let mut shared = self.shared_state();
             shared.last_reply_content = Some(execContext.roundManager.getDisplayContent());
-            shared.last_turn_context_window = completedContextWindow;
+            shared.last_turn_context_window =
+                completedContextWindow.map(|(windowSize, _)| windowSize);
         }
         let _ = finalProcessedInput;
         let _ = requestHistory;
@@ -2507,6 +2692,11 @@ impl EnhancedAIService {
         if maxTokens > 0 {
             let usageRatio = currentTokens as f64 / maxTokens as f64;
             if usageRatio >= tokenUsageThreshold {
+                if !isSubTask && !runtime.textOnly {
+                    self.recordConversationContext(
+                        chatId.as_deref(), runtime, &currentChatHistory, &availableTools, enableThinking,
+                    );
+                }
                 AppLogger::w(
                     TAG,
                     &format!(
@@ -2565,6 +2755,12 @@ impl EnhancedAIService {
                 context, runtime.aiService.clone(), functionType.clone(),
                 UsageRequestSource::TOOL_RESULT_RESPONSE, chatId.clone(),
             )?;
+            tokenRequest.setAttribution(
+                stream,
+                runtime.modelConfig.providerId.clone(),
+                String::new(),
+                mask_api_key_fingerprint(&runtime.modelConfig.apiKey),
+            );
             service
                 .send_message(SendMessageRequest {
                     chat_history: currentChatHistory,
@@ -2586,6 +2782,11 @@ impl EnhancedAIService {
         let mut response = match responseResult {
             Ok(response) => response,
             Err(error) => {
+                tokenRequest.markStatus(if matches!(error, AiServiceError::RequestCancelled) {
+                    UsageRequestStatus::CANCELLED
+                } else {
+                    UsageRequestStatus::FAILED
+                });
                 turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
                 return Err(error);
             }
@@ -2597,6 +2798,7 @@ impl EnhancedAIService {
         });
 
         if !self.isExecutionContextActive(context) {
+            tokenRequest.markStatus(UsageRequestStatus::CANCELLED);
             turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
             return Ok(false);
         }
@@ -2608,6 +2810,7 @@ impl EnhancedAIService {
         }
 
         if !self.isExecutionContextActive(context) {
+            tokenRequest.markStatus(UsageRequestStatus::CANCELLED);
             turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
             return Ok(false);
         }
@@ -2622,6 +2825,9 @@ impl EnhancedAIService {
                     if !Self::isExecutionContextActiveInSharedState(&activeExecutionState, context)
                     {
                         return;
+                    }
+                    if !content.is_empty() {
+                        tokenRequest.markFirstOutput();
                     }
                     let _ = responseRevisions.append(&content);
                     chunkCount += 1;
@@ -2658,6 +2864,11 @@ impl EnhancedAIService {
                 }
             })
             .await;
+        if !self.isExecutionContextActive(context) {
+            tokenRequest.markStatus(UsageRequestStatus::CANCELLED);
+        } else if response.terminal_failure().is_some() {
+            tokenRequest.markStatus(UsageRequestStatus::FAILED);
+        }
         let tokens = turnUsage.finishRequest(&tokenRequest, self.provider_runtime_context.support()).await?;
         if !self.isExecutionContextActive(context) {
             return Ok(false);
@@ -3191,6 +3402,11 @@ impl EnhancedAIService {
     }
 
     #[allow(non_snake_case)]
+    pub fn getRequestWindowBreakdown(&self) -> Option<ContextWindowBreakdown> {
+        self.shared_state().request_window_breakdown
+    }
+
+    #[allow(non_snake_case)]
     pub fn getLastProviderModel(&self) -> Option<String> {
         self.shared_state().last_provider_model.clone()
     }
@@ -3268,12 +3484,19 @@ impl Clone for EnhancedAIService {
             tool_handler: self.tool_handler.clone(),
             input_processing_state: self.input_processing_state.clone(),
             request_window_estimate_flow: self.request_window_estimate_flow.clone(),
+            request_window_breakdown_flow: self.request_window_breakdown_flow.clone(),
             api_preferences: self.api_preferences.clone(),
             tool_processing_scope: self.tool_processing_scope.clone(),
             package_manager: self.package_manager.clone(),
             provider_runtime_context: self.provider_runtime_context.clone(),
             shared_state: self.shared_state.clone(),
         }
+    }
+}
+
+impl std::fmt::Debug for EnhancedAIService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("EnhancedAIService").finish_non_exhaustive()
     }
 }
 
@@ -3324,7 +3547,7 @@ fn resolveToolDisplayName(tool: &RuntimeAITool) -> String {
 fn buildPackageProxyToolPrompt() -> ToolPrompt {
     ToolPrompt {
         name: "package_proxy".to_string(),
-        description: "Execute an activated package tool. Every call returns execution_id and waits up to 20 seconds. A running execution continues in the background; collect further output and final results with package_wait instead of re-running the tool.".to_string(),
+        description: "Execute an activated package tool and wait up to 20 seconds. Completed calls return business results directly. Running work returns execution_id; collect further output and final results with package_wait instead of re-running the tool. has_more_output or a nonzero pending_execution_count requires further reads.".to_string(),
         parameters: buildToolParametersJson(&[
             crate::chat::config::SystemToolPrompts::ToolParameterSchema {
                 name: "tool_name".to_string(),
@@ -4324,5 +4547,215 @@ mod package_proxy_json_tests {
         assert_eq!(parameter.r#type, "object");
         assert!(parameter.description.contains("JSON"));
         assert!(!parameter.description.contains("YAML"));
+    }
+}
+
+/// Computes category token breakdown across system prompt, tools, files, tool results, and conversation.
+pub fn calculate_context_window_breakdown(
+    prepared_history: &[PromptTurn],
+    available_tools: &[ToolPrompt],
+    total_window_size: i64,
+) -> Option<ContextWindowBreakdown> {
+    if total_window_size <= 0 {
+        return None;
+    }
+    let mut raw_system = 0i64;
+    let mut raw_tools = if available_tools.is_empty() {
+        0
+    } else {
+        let tools_json = StructuredToolCallBridge::buildToolsArray(Some(available_tools)).to_string();
+        ChatUtils::estimate_token_count(&tools_json)
+    };
+    let mut raw_files = 0i64;
+    let mut raw_tool_results = 0i64;
+    let mut raw_conversation = 0i64;
+
+    for turn in prepared_history {
+        match turn.kind {
+            PromptTurnKind::SYSTEM => {
+                raw_system += ChatUtils::estimate_token_count(&turn.content);
+            }
+            PromptTurnKind::TOOL_CALL => {
+                raw_tools += ChatUtils::estimate_token_count(&turn.content);
+            }
+            PromptTurnKind::TOOL_RESULT => {
+                raw_tool_results += ChatUtils::estimate_token_count(&turn.content);
+            }
+            PromptTurnKind::ASSISTANT | PromptTurnKind::SUMMARY => {
+                raw_conversation += ChatUtils::estimate_token_count(&turn.content);
+            }
+            PromptTurnKind::USER => {
+                let (file_tokens, text_tokens) =
+                    estimate_user_turn_file_and_text_tokens(&turn.content);
+                raw_files += file_tokens;
+                raw_conversation += text_tokens;
+            }
+        }
+    }
+
+    let raw = [
+        raw_system,
+        raw_tools,
+        raw_files,
+        raw_tool_results,
+        raw_conversation,
+    ];
+    if raw.iter().all(|&value| value <= 0) {
+        return None;
+    }
+    let allocated = distribute_tokens_proportionally(raw, total_window_size);
+    Some(ContextWindowBreakdown {
+        systemPromptTokens: allocated[0],
+        toolTokens: allocated[1],
+        fileTokens: allocated[2],
+        toolResultTokens: allocated[3],
+        conversationTokens: allocated[4],
+    })
+}
+
+fn estimate_user_turn_file_and_text_tokens(content: &str) -> (i64, i64) {
+    let mut ranges = ChatMarkupRegex::attachment_ranges(content);
+    ranges.extend(ChatMarkupRegex::workspace_attachment_ranges(content));
+    if ranges.is_empty() {
+        return (0, ChatUtils::estimate_token_count(content));
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if start >= end {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    if merged.is_empty() {
+        return (0, ChatUtils::estimate_token_count(content));
+    }
+    let mut file_tokens = 0i64;
+    let mut remainder = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        if cursor < start {
+            remainder.push_str(&content[cursor..start]);
+        }
+        file_tokens += ChatUtils::estimate_token_count(&content[start..end]);
+        cursor = end;
+    }
+    if cursor < content.len() {
+        remainder.push_str(&content[cursor..]);
+    }
+    let trimmed_remainder = remainder.trim();
+    let text_tokens = if trimmed_remainder.is_empty() {
+        0
+    } else {
+        ChatUtils::estimate_token_count(trimmed_remainder)
+    };
+    (file_tokens, text_tokens)
+}
+
+fn distribute_tokens_proportionally<const N: usize>(raw: [i64; N], total: i64) -> [i64; N] {
+    let clean = raw.map(|value| value.max(0));
+    let raw_sum: i128 = clean.iter().map(|&value| i128::from(value)).sum();
+    if raw_sum <= 0 || total <= 0 {
+        return [0; N];
+    }
+    let total_i128 = i128::from(total);
+    let mut allocated = [0i64; N];
+    let mut remainders = [(-1i128, 0usize); N];
+    let mut assigned = 0i128;
+    for (index, &value) in clean.iter().enumerate() {
+        if value == 0 {
+            remainders[index] = (-1, index);
+            continue;
+        }
+        let numerator = i128::from(value) * total_i128;
+        let base = numerator / raw_sum;
+        allocated[index] = base as i64;
+        assigned += base;
+        remainders[index] = (numerator % raw_sum, index);
+    }
+    let mut leftover = (total_i128 - assigned) as usize;
+    remainders.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    for (remainder, index) in remainders {
+        if leftover == 0 {
+            break;
+        }
+        if remainder < 0 {
+            continue;
+        }
+        allocated[index] += 1;
+        leftover -= 1;
+    }
+    allocated
+}
+
+#[cfg(test)]
+mod context_window_breakdown_tests {
+    use super::calculate_context_window_breakdown;
+    use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
+    use operit_model::ToolPrompt::ToolPrompt;
+
+    #[test]
+    fn splits_all_five_categories_and_conserves_total_tokens() {
+        let history = vec![
+            PromptTurn::new(
+                PromptTurnKind::SYSTEM,
+                "You are an autonomous systems engineer working carefully.",
+            ),
+            PromptTurn::new(
+                PromptTurnKind::USER,
+                "Please review this config <attachment id=\"a\" filename=\"cfg.json\" type=\"application/json\">{\"port\":8080,\"tls\":true}</attachment> <workspace_attachment>/workspace/app</workspace_attachment>",
+            ),
+            PromptTurn::new(
+                PromptTurnKind::TOOL_CALL,
+                "<tool name=\"read_file\"><param name=\"path\">cfg.json</param></tool>",
+            ),
+            PromptTurn::new(
+                PromptTurnKind::TOOL_RESULT,
+                "<tool_result name=\"read_file\" status=\"success\">{\"port\":8080}</tool_result>",
+            ),
+            PromptTurn::new(
+                PromptTurnKind::ASSISTANT,
+                "Configuration verified cleanly.",
+            ),
+        ];
+        let tools = vec![ToolPrompt::new(
+            "read_file".to_string(),
+            "Reads a UTF-8 file from the workspace.".to_string(),
+        )];
+        let breakdown = calculate_context_window_breakdown(&history, &tools, 1200)
+            .expect("breakdown should be computed when turns or tools exist");
+        assert!(breakdown.systemPromptTokens > 0);
+        assert!(breakdown.toolTokens > 0);
+        assert!(breakdown.fileTokens > 0);
+        assert!(breakdown.toolResultTokens > 0);
+        assert!(breakdown.conversationTokens > 0);
+        assert_eq!(
+            breakdown.systemPromptTokens
+                + breakdown.toolTokens
+                + breakdown.fileTokens
+                + breakdown.toolResultTokens
+                + breakdown.conversationTokens,
+            1200
+        );
+    }
+
+    #[test]
+    fn zero_window_or_empty_categories_return_none_without_inventing_buckets() {
+        let history = vec![PromptTurn::new(PromptTurnKind::USER, "Hello world")];
+        assert!(calculate_context_window_breakdown(&history, &[], 0).is_none());
+        assert!(calculate_context_window_breakdown(&[], &[], 500).is_none());
+        let text_only = calculate_context_window_breakdown(&history, &[], 50)
+            .expect("single user turn should produce conversation breakdown");
+        assert_eq!(text_only.systemPromptTokens, 0);
+        assert_eq!(text_only.toolTokens, 0);
+        assert_eq!(text_only.fileTokens, 0);
+        assert_eq!(text_only.toolResultTokens, 0);
+        assert_eq!(text_only.conversationTokens, 50);
     }
 }

@@ -95,10 +95,16 @@ impl RuntimeToolSupport {
     /// Starts one host-owned delivery worker. It survives plugin unload and restores persisted plans.
     pub fn startScheduledChatDelivery(self: &Arc<Self>) -> Result<(), String> {
         if self.hostManager.runtimeStorageHost.is_none() { return Ok(()); }
+        let manager = self.runtimeBindings()?.toolHandler.getOrCreatePackageManager();
+        let readiness = manager.lock().map_err(|error| error.to_string())?.packageRegistryReadiness();
         let scheduler = self.hostManager.hostRuntimeTaskSchedulerHost.clone().ok_or("Scheduled chat scheduler is unavailable")?;
         let timer = scheduler.clone();
         let weak = Arc::downgrade(self);
         scheduler.scheduleHostRuntimeAsyncTask("scheduled-chat-messages", Box::new(move || Box::pin(async move {
+            if let Err(error) = readiness.wait_until_ready().await {
+                operit_util::AppLogger::AppLogger::e("ScheduledChatMessages", &error);
+                return;
+            }
             loop {
                 let Some(runtime) = weak.upgrade() else { break; };
                 if let Err(error) = runtime.preparedChatDelivery.reconcile(&runtime.hostManager, &runtime.chatRuntimeHolder).await {
@@ -635,13 +641,13 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
     /// Returns built-in package assets owned by the runtime.
     #[allow(non_snake_case)]
     fn builtinPluginAssets(&self) -> &'static [RuntimePluginAsset] {
-        runtimeBuiltinPluginAssets()
+        BUILTIN_PLUGIN_ASSETS
     }
 
     /// Returns bundled external package assets owned by the runtime.
     #[allow(non_snake_case)]
     fn bundledExternalPluginAssets(&self) -> &'static [RuntimePluginAsset] {
-        runtimeBundledExternalPluginAssets()
+        BUNDLED_EXTERNAL_PLUGIN_ASSETS
     }
 
     /// Returns built-in skills that are installed without enabling AI visibility.
@@ -1036,6 +1042,8 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                 let provider = aiService.lock().await;
                 provider.provider_model()
             };
+            let startedAtMs = operit_host_api::TimeUtils::currentTimeMillis();
+            let mut firstOutputAtMs = None::<i64>;
             let mut response = {
                 let mut provider = aiService.lock().await;
                 provider
@@ -1064,18 +1072,28 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                     })?
             };
             let mut output = String::new();
-            response.collect(&mut |chunk| output.push_str(&chunk)).await;
+            response
+                .collect(&mut |chunk| {
+                    if !chunk.is_empty() && firstOutputAtMs.is_none() {
+                        firstOutputAtMs = Some(operit_host_api::TimeUtils::currentTimeMillis());
+                    }
+                    output.push_str(&chunk);
+                })
+                .await;
             ensure_response_completed(response.as_ref()).map_err(|error| {
                 let message = error.to_string();
                 modelErrors.set_value(Some(message.clone()));
                 message
             })?;
+            let completedAtMs = operit_host_api::TimeUtils::currentTimeMillis();
             if request.recordTokenUsage {
-                let (inputTokens, cachedInputTokens, outputTokens) = {
+                let (inputTokens, cachedInputTokens, cacheWriteTokens, reasoningTokens, outputTokens) = {
                     let provider = aiService.lock().await;
                     (
                         provider.input_token_count(),
                         provider.cached_input_token_count(),
+                        provider.cache_write_input_token_count(),
+                        provider.reasoning_token_count(),
                         provider.output_token_count(),
                     )
                 };
@@ -1089,15 +1107,53 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                         cachedInputTokens,
                     )
                     .map_err(|error| error.to_string())?;
+                let totalDurationMs = (completedAtMs - startedAtMs).max(0);
+                let waitDurationMs = firstOutputAtMs
+                    .map(|first| (first - startedAtMs).max(0))
+                    .unwrap_or(totalDurationMs);
+                let outputDurationMs = firstOutputAtMs
+                    .map(|first| (completedAtMs - first).max(0))
+                    .unwrap_or(0);
+                let (estimatedCost, currency) = match modelConfig.pricing.as_ref() {
+                    Some(pricing) => (
+                        operit_model::ProviderQuota::calculate_model_cost(
+                            pricing,
+                            inputTokens,
+                            cachedInputTokens,
+                            cacheWriteTokens,
+                            outputTokens,
+                        ),
+                        operit_model::ProviderQuota::pricing_currency_code(&pricing.currency)
+                            .to_string(),
+                    ),
+                    None => (0.0, String::new()),
+                };
                 operit_store::repository::UsageStatisticsStore::UsageStatisticsStore::new()
-                    .recordProviderModelRequest(
-                        providerModel,
-                        request.functionType,
-                        operit_store::repository::UsageStatisticsStore::UsageRequestSource::CHAT_RESPONSE,
-                        None,
-                        inputTokens,
-                        outputTokens,
-                        cachedInputTokens,
+                    .recordProviderModelRequestDetailed(
+                        operit_store::repository::UsageStatisticsStore::UsageRequestCapture {
+                            providerModel,
+                            functionType: request.functionType,
+                            source: operit_store::repository::UsageStatisticsStore::UsageRequestSource::CHAT_RESPONSE,
+                            chatId: None,
+                            inputTokens,
+                            outputTokens,
+                            cachedInputTokens,
+                            cacheWriteTokens,
+                            reasoningTokens,
+                            waitDurationMs,
+                            outputDurationMs,
+                            totalDurationMs,
+                            status: operit_model::ProviderQuota::UsageRequestStatus::COMPLETED,
+                            originNodeId: String::new(),
+                            providerId: modelConfig.providerId.clone(),
+                            keyId: String::new(),
+                            keyFingerprint: operit_model::ProviderQuota::mask_api_key_fingerprint(
+                                &modelConfig.apiKey,
+                            ),
+                            estimatedCost,
+                            currency,
+                            stream: false,
+                        },
                     )
                     .map_err(|error| error.to_string())?;
             }
@@ -1334,40 +1390,6 @@ fn providerParameterToModel(
         required: parameter.required,
         default: parameter.default,
     }
-}
-
-/// Returns a static view of runtime built-in package assets.
-fn runtimeBuiltinPluginAssets() -> &'static [RuntimePluginAsset] {
-    static ASSETS: OnceLock<Vec<RuntimePluginAsset>> = OnceLock::new();
-    ASSETS
-        .get_or_init(|| {
-            BUILTIN_PLUGIN_ASSETS
-                .iter()
-                .map(|asset| RuntimePluginAsset {
-                    name: asset.name,
-                    bytes: asset.bytes,
-                    sha256: asset.sha256,
-                })
-                .collect()
-        })
-        .as_slice()
-}
-
-/// Returns a static view of bundled external package assets.
-fn runtimeBundledExternalPluginAssets() -> &'static [RuntimePluginAsset] {
-    static ASSETS: OnceLock<Vec<RuntimePluginAsset>> = OnceLock::new();
-    ASSETS
-        .get_or_init(|| {
-            BUNDLED_EXTERNAL_PLUGIN_ASSETS
-                .iter()
-                .map(|asset| RuntimePluginAsset {
-                    name: asset.name,
-                    bytes: asset.bytes,
-                    sha256: asset.sha256,
-                })
-                .collect()
-        })
-        .as_slice()
 }
 
 /// Returns a static view of bundled external skill assets.

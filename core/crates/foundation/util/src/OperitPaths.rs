@@ -49,6 +49,7 @@ pub const GITHUB_AUTH_PREFERENCES_PATH: &str = Layout::GITHUB_AUTH_PREFERENCES_P
 pub const CODEX_AUTH_PREFERENCES_PATH: &str = Layout::CODEX_AUTH_PREFERENCES_PATH;
 pub const MODEL_CONFIGS_PREFERENCES_PATH: &str = Layout::MODEL_CONFIGS_PREFERENCES_PATH;
 pub const FUNCTIONAL_CONFIGS_PREFERENCES_PATH: &str = Layout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH;
+pub const PROVIDER_QUOTA_PREFERENCES_PATH: &str = Layout::PROVIDER_QUOTA_PREFERENCES_PATH;
 pub const PACKAGE_MANAGER_PREFERENCES_PATH: &str = Layout::PACKAGE_MANAGER_PREFERENCES_PATH;
 pub const CURRENT_CHAT_ID_PREFERENCES_PATH: &str = Layout::CURRENT_CHAT_ID_PREFERENCES_PATH;
 pub const SQLITE_DATABASE_PATH: &str = Layout::SQLITE_DATABASE_PATH;
@@ -164,11 +165,6 @@ pub fn webSessionBrowserDownloadsPath() -> Result<PathBuf, String> {
 #[allow(non_snake_case)]
 pub fn webSessionBrowserDownloadFilesDir() -> Result<PathBuf, String> {
     relativeDir(RUNTIME_WEBSESSION_BROWSER_DOWNLOAD_FILES_DIR_PATH)
-}
-
-#[allow(non_snake_case)]
-pub fn rawSnapshotExcludedFilesTopLevelDirNames() -> Vec<String> {
-    Vec::new()
 }
 
 #[allow(non_snake_case)]

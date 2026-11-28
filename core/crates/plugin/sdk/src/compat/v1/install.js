@@ -245,6 +245,26 @@ function __operitInstallV1SharedPreferences(runtime, api) {
     java.getApplicationContext = function() { return wrap(applicationContext.apply(java, arguments)); };
 }
 
+/**
+ * Preserves the v1 boolean dialog contract over the canonical action interface.
+ * @param {typeof import('../../../../../../../plugins/types/network').Net.browserDialog} current
+ * @returns {typeof import('../../../../../../../plugins/types-v1/network').Net.browserHandleDialog}
+ */
+function __operitCreateV1BrowserDialog(current) {
+    /** Resolves one existing dialog and retains the historical success receipt. */
+    return async function browserHandleDialog(options) {
+        if (!options || typeof options.accept !== 'boolean') {
+            throw new TypeError('browserHandleDialog requires a boolean accept');
+        }
+        /** @type {import('../../../../../../../plugins/types/network').Net.HostBrowserDialogOptionsAction} */
+        var action = options.accept ? 'accept' : 'dismiss';
+        await current(options.accept && options.promptText !== undefined
+            ? { action: action, promptText: options.promptText }
+            : { action: action });
+        return 'OK';
+    };
+}
+
 (/**
  * Installs typed v1 adapters in the runtime's dynamic registration namespace.
  * @param {Record<string, any>} runtime
@@ -253,6 +273,17 @@ function installV1Adapters(runtime) {
     var Tools = runtime.Tools;
     var api = runtime.__operitToolPkgApi;
     __operitInstallV1SharedPreferences(runtime, api);
+    var legacyBrowserDialog = api.method()
+        .between('1.0.0', '2.0.0', __operitCreateV1BrowserDialog(Tools.Net.browserDialog))
+        .build('Tools.Net.browserHandleDialog');
+    Object.defineProperty(Tools.Net, 'browserHandleDialog', {
+        configurable: true,
+        /** Exposes the historical method only for admitted v1 invocations. */
+        get: function() {
+            var version = api.currentVersion();
+            return version === '1.0.0' || version === '1.0.1' ? legacyBrowserDialog : undefined;
+        },
+    });
     var currentSettings = Object.assign({}, Tools.SoftwareSettings);
     /** Resolves the native installation owner retained by the exact active call. */
     function environmentPackageName() {
@@ -287,10 +318,14 @@ function installV1Adapters(runtime) {
     var currentFiles = Object.assign({}, Tools.Files);
     var legacyFiles = __operitCreateV1Files(currentFiles);
     for (var [method, filesImplementation] of Object.entries(legacyFiles)) {
-        Tools.Files[method] = api.method()
-            .between('1.0.0', '2.0.0', filesImplementation)
-            .since('2.0.0', currentFiles[method])
-            .build('Tools.Files.' + method);
+        /** Keeps v1 methods that the current API family retired on the legacy range only. */
+        var methodBuilder = api.method()
+            .between('1.0.0', '2.0.0', filesImplementation);
+        var currentImplementation = currentFiles[method];
+        if (typeof currentImplementation === 'function') {
+            methodBuilder = methodBuilder.since('2.0.0', currentImplementation);
+        }
+        Tools.Files[method] = methodBuilder.build('Tools.Files.' + method);
     }
     var workflow = __operitCreateV1Workflow(
         /** Invokes the declared workflow prerequisite's published method. */

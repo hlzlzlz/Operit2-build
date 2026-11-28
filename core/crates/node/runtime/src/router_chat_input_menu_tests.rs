@@ -28,7 +28,11 @@ impl TestRouteTarget for MenuEndpoint {
                 currentWindowSize: 123,
                 inputTokenCount: 456,
                 outputTokenCount: 789,
-                maxContextLength: 64.0,
+                cachedInputTokenCount: None,
+                cacheHitRate: None,
+                maxContextTokens: 64_000,
+                breakdown: None,
+                summaryThresholdRatio: None,
             })
             .unwrap(),
             "triggerChatInputMenuToggle" => operit_link::toCoreValue(true).unwrap(),

@@ -202,6 +202,7 @@ class UserPreferencesManager {
     'bubbleUserContentPaddingRight': 'bubble_content_padding_right',
     'bubbleAiContentPaddingLeft': 'bubble_ai_content_padding_left',
     'bubbleAiContentPaddingRight': 'bubble_ai_content_padding_right',
+    'chatContentHorizontalPadding': 'chat_content_horizontal_padding',
     'customUserAvatarUri': 'custom_user_avatar_uri',
     'avatarShape': 'avatar_shape',
     'avatarCornerRadius': 'avatar_corner_radius',
@@ -584,6 +585,7 @@ class UserPreferencesManager {
     double? bubbleUserContentPaddingRight,
     double? bubbleAiContentPaddingLeft,
     double? bubbleAiContentPaddingRight,
+    double? chatContentHorizontalPadding,
     bool? showThinkingProcess,
     bool? showModelProvider,
     bool? showModelName,
@@ -710,6 +712,8 @@ class UserPreferencesManager {
         'bubbleAiContentPaddingLeft': bubbleAiContentPaddingLeft,
       if (bubbleAiContentPaddingRight != null)
         'bubbleAiContentPaddingRight': bubbleAiContentPaddingRight,
+      if (chatContentHorizontalPadding != null)
+        'chatContentHorizontalPadding': chatContentHorizontalPadding,
       if (showThinkingProcess != null)
         'showThinkingProcess': showThinkingProcess,
       if (showModelProvider != null) 'showModelProvider': showModelProvider,

@@ -34,12 +34,25 @@ text drafts. Switching to another workspace restores that workspace's session;
 a first visit starts with the panel closed and the home tab. Conversations
 without a bound workspace have separate sessions keyed by conversation ID.
 
+The chat input's `@` file suggestions use the same file root as the workspace
+panel: mounted folders for a bound workspace, or the conversation's output
+directory when it has no workspace. Selecting a file reads it through the VFS
+and attaches its text to the chat.
+
 These presentation sessions survive chat screen remounts within the running
 frontend. They are never written to preferences, a database, or synchronized
 Core state, so restarting the frontend resets them and other devices keep their
 own workspace presentation. The panel remounts when its session changes, keeping
 file navigation and asynchronous panel callbacks within their owning workspace.
 Embedded chat surfaces do not change the main workspace or its plugin context.
+
+File rows expose **Open in other app** in both the long-press and secondary-click
+menus on every host. The action passes the listing's complete VFS address,
+including its owning node, to the existing workspace file opener. It is
+available independently of file mutation controls and does not apply to
+directories. Pending opens disable duplicate requests; host failures appear in
+the initiating workspace. Platform presentation remains owned by the Host
+file-system implementation.
 
 Plugins moved from the application navigation sidebar into the workspace remain
 global. `SidebarDockController.secondaryViews` owns their placement, and every

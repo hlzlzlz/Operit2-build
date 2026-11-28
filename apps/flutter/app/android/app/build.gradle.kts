@@ -20,16 +20,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// Release builds resolve the patched Android engine from the static Maven
-// repository published by flutter-ohos-engine-maven.
+// Resolve patched Android embeddings and the arm64 release engine from our Maven repository.
 repositories {
-    maven { url = uri("https://h4rm00n.github.io/flutter-ohos-engine-maven") }
+    maven { url = uri("https://aaswordman.github.io/flutter-ohos-engine-maven") }
 }
 configurations.configureEach {
-    if (!name.contains("release", ignoreCase = true)) return@configureEach
     resolutionStrategy.eachDependency {
-        if (requested.group == "io.flutter") {
-            useVersion("1.0.0-42d3d75a-operit.9.2")
+        if (requested.group == "io.flutter" &&
+            (requested.name.startsWith("flutter_embedding_") ||
+                (name.contains("release", ignoreCase = true) && requested.name == "arm64_v8a_release"))) {
+            useVersion("1.0.0-42d3d75a-operit.13")
         }
     }
 }
@@ -221,7 +221,11 @@ android {
     packaging {
         resources.excludes += "META-INF/versions/**/OSGI-INF/MANIFEST.MF"
         jniLibs {
-            useLegacyPackaging = true
+            // Keep JNI libraries uncompressed and page-aligned inside the APK so
+            // the linker mmaps them in place. Legacy packaging extracts the .so
+            // files onto the compressed F2FS data volume, where dlopen's random
+            // page faults cost seconds on cold start.
+            useLegacyPackaging = false
         }
     }
 
@@ -397,6 +401,7 @@ val syncOperitPlugins = tasks.register<Exec>("syncOperitPlugins") {
         "--source",
         "runtime",
         "--no-hot-reload",
+        "--flutter-assets",
     )
 }
 
@@ -480,6 +485,8 @@ androidComponents {
                 )
                 if (rustProfile == "release") {
                     cargoArguments.add("--release")
+                    // Cargo profiles are workspace-wide; scope symbol stripping to Android tasks.
+                    environment("CARGO_PROFILE_RELEASE_STRIP", "symbols")
                 }
                 if (operitExternalRuntime) {
                     cargoArguments.addAll(listOf("--features", "android-module-app"))

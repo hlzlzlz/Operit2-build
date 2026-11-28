@@ -5,7 +5,7 @@ import { load, plain, clock, settle } from "./harness.mjs";
 /** Boots the actual plugin once with isolated SDK ports and real cross-module handlers. */
 function runtime(options = {}) {
   const time = clock(), configs = new Map(), handlers = {}, apis = {}, channels = new Map(), requests = [], toasts = [];
-  const bindings = { alice: "card:alice", bob: "card:bob" };
+  const bindings = { alice: "card:alice", bob: "card:bob", ...options.bindings };
   const ToolPkg = {
     ipc: { on(name, handler) { channels.set(name, handler); }, async call(name, payload) { return channels.get(name)(payload); } },
     async callDependency(owner, method, input) {
@@ -13,7 +13,11 @@ function runtime(options = {}) {
       switch (method) {
         case "activePrompt.get": return { CharacterCard: { id: "alice" } };
         case "character.get": return { id: input.id, name: "Alice" };
-        case "chat.configuration.binding.read": return { chatId: input.chatId, selection: bindings[input.chatId] };
+        case "chat.configuration.binding.find": {
+          if (options.bindingError) throw options.bindingError;
+          const selection = bindings[input.chatId];
+          return selection === undefined ? null : { chatId: input.chatId, selection };
+        }
         default: throw new Error(`Unexpected dependency: ${method}`);
       }
     },
@@ -22,10 +26,17 @@ function runtime(options = {}) {
     registerInputMenuTogglePlugin({ function: handler }) { handlers.menu = handler; },
     registerChatResponseHook({ function: handler }) { handlers.response = handler; },
     registerChatInputHook({ function: handler }) { handlers.input = handler; },
+    registerChatLifecycleHook({ function: handler }) { handlers.lifecycle = handler; },
     registerSystemPromptComposeHook({ function: handler }) { handlers.prompt = handler; },
     registerToolboxUiModule({ screen }) { handlers.screen = screen; },
   };
-  const Tools = { Chat: { async sendMessage(request) {
+  const Tools = { Chat: {
+    /** Cancels only the explicit controlled native send used by truncation tests. */
+    async cancel(chatId) {
+      if (options.cancel === undefined) throw new Error("Unprovided native cancellation");
+      return options.cancel(chatId);
+    },
+    async sendMessage(request) {
     const decision = await handlers.input(input(request.input.text, { chatId: request.chatId, source: "Sequence" }));
     assert.equal(decision, undefined, "A native send must not re-enter the merge queue");
     requests.push(plain(request));
@@ -34,7 +45,7 @@ function runtime(options = {}) {
   } }, System: { async toast(message) { toasts.push(message); } } };
   const PluginConfig = { async use(name, defaults) { if (!configs.has(name)) configs.set(name, defaults); return configs.get(name); }, async flush() {} };
   load("main", { ToolPkg, Tools, PluginConfig, ...time }).registerToolPkg();
-  return { handlers, apis, time, configs, requests, toasts,
+  return { handlers, apis, time, configs, requests, toasts, bindings,
     admin: request => channels.get("waifu.settings")(request),
     async enable(changes = {}) {
       const context = await channels.get("waifu.settings")({ action: "mode.get" });
@@ -71,6 +82,47 @@ test("ordinary Waifu starts disabled and its switch is bound to the actual chara
   assert.equal(await r.handlers.response(response("started", "", "bob")), false);
   const menu = await r.handlers.menu({ eventPayload: { action: "create", chatId: "alice" } });
   assert.equal(menu.toggles[0].isChecked, true);
+});
+
+test("enabling character cards after chat creation leaves unbound conversations untouched", async () => {
+  const r = runtime(); await r.enable({ mergeSend: true });
+  const chatId = "created-without-character-plugin";
+  const attachments = [{ path: "/host/image.jpg", name: "image.jpg", type: "image/jpeg" }];
+  const event = input("这是什么", { chatId, attachments, attachmentCount: 1, hasAttachments: true });
+  assert.equal(await r.handlers.input(event), undefined);
+  assert.deepEqual(event.eventPayload.attachments, attachments);
+  assert.equal(await r.handlers.input(input("普通文字", { chatId })), undefined);
+  assert.equal(await r.handlers.input(input("引用回复", { chatId, replyToMessageTimestamp: 42 })), undefined);
+  assert.equal(await r.handlers.menu({ eventPayload: { action: "create", chatId } }), undefined);
+  assert.equal(await r.handlers.menu({ eventPayload: { action: "toggle", chatId, toggleId: "waifu.mode" } }), undefined);
+  assert.deepEqual(plain(await r.apis["mode.status"]({ payload: { chatId } })), { enabled: false });
+  assert.equal(await r.handlers.prompt({ event: "after_compose_system_prompt", eventPayload: { chatId, systemPrompt: "Original prompt" } }), undefined);
+  assert.equal(await r.handlers.response(response("started", "", chatId)), false);
+  r.time.advance(15000); await settle();
+  assert.deepEqual(r.requests, []);
+  assert.deepEqual(Object.keys(r.configs.get("mode").bindings), ["card:alice"]);
+
+  // An explicit later binding activates the selected role's existing settings.
+  r.bindings[chatId] = "card:alice";
+  assert.deepEqual(plain(await r.apis["mode.status"]({ payload: { chatId } })), { enabled: true });
+  assert.equal(await r.handlers.response(response("started", "", chatId)), true);
+});
+
+test("an explicitly bound model chat keeps its own Waifu settings separate from unbound chats", async () => {
+  const r = runtime({ bindings: { model: "model:chat" } });
+  await r.handlers.menu({ eventPayload: { action: "toggle", chatId: "model", toggleId: "waifu.mode" } });
+  assert.deepEqual(plain(await r.apis["mode.status"]({ payload: { chatId: "model" } })), { enabled: true });
+  assert.deepEqual(plain(await r.apis["mode.status"]({ payload: { chatId: "unbound" } })), { enabled: false });
+  assert.deepEqual(plain(await r.apis["mode.status"]({ payload: { chatId: "alice" } })), { enabled: false });
+  assert.deepEqual(Object.keys(r.configs.get("mode").bindings), ["model:chat"]);
+});
+
+test("binding storage errors still stop hooks instead of being treated as an unbound chat", async () => {
+  const r = runtime({ bindingError: new Error("Character storage read failed") });
+  await assert.rejects(r.handlers.input(input("hello")), /Character storage read failed/);
+  await assert.rejects(r.handlers.menu({ eventPayload: { action: "create", chatId: "alice" } }), /Character storage read failed/);
+  await assert.rejects(r.handlers.prompt({ event: "after_compose_system_prompt", eventPayload: { chatId: "alice", systemPrompt: "Original prompt" } }), /Character storage read failed/);
+  await assert.rejects(r.handlers.response(response("started")), /Character storage read failed/);
 });
 
 test("ordinary chat receives prompt rules, stable sentences and real emotion images without QQBot", async () => {
@@ -136,6 +188,43 @@ test("attachments and reply targets preserve their native submission after accep
   assert.equal(r.requests.length, 2); assert.equal(r.requests[0].input.text, "先说一句");
   assert.deepEqual(r.requests[1].input, { text: "看图", attachments, replyToMessageTimestamp: 77 });
   assert.equal(r.time.pending(), 0);
+});
+
+/** Builds the exact native lifecycle boundary emitted before rollback and edit/resend. */
+function truncate(chatId = "alice") {
+  return { eventName: "before_history_truncate", eventPayload: { eventName: "before_history_truncate", chatId, firstDeletedMessageTimestamp: 10 } };
+}
+
+test("rollback removes unsent Waifu input and its timers while keeping other chats intact", async () => {
+  const r = runtime({ bindings: { bob: "card:alice" } }); await r.enable({ mergeSend: true, mergeDelayMs: 500 });
+  await r.handlers.input(input("旧对话未发送内容"));
+  await r.handlers.input(input("另一个对话", { chatId: "bob" }));
+  assert.deepEqual(plain(await r.handlers.lifecycle(truncate())), { extension: null });
+  await r.handlers.input(input("回退后重新发送"));
+  await r.time.advance(500); await settle();
+  assert.equal(r.time.pending(), 0);
+  assert.deepEqual(r.requests.map(request => request.input.text).sort(), ["另一个对话", "回退后重新发送"].sort());
+  assert.deepEqual(r.toasts, []);
+});
+
+test("rollback awaits native cancellation and drops queued Waifu deliveries before accepting a fresh send", async () => {
+  let complete, cancelled = false;
+  const r = runtime({
+    /** Holds only the active pre-rollback native send. */
+    send: (_request, index) => index === 1 ? new Promise(resolve => { complete = resolve; }) : Promise.resolve({ outcome: { type: "committed", status: "completed" } }),
+    /** Records the actual cancellation boundary without settling the controlled receipt early. */
+    async cancel(chatId) { assert.equal(chatId, "alice"); cancelled = true; return { chatId, cancelRequested: true }; },
+  });
+  await r.enable({ mergeSend: true, mergeDelayMs: 500 });
+  await r.handlers.input(input("旧对话正在生成")); await r.time.advance(500);
+  await r.handlers.input(input("旧队列里的一条")); await r.time.advance(500);
+  let truncated = false;
+  const stopping = r.handlers.lifecycle(truncate()).then(() => { truncated = true; });
+  await settle(); assert.equal(cancelled, true); assert.equal(truncated, false); assert.equal(r.requests.length, 1);
+  complete({ outcome: { type: "committed", status: "cancelled" } }); await stopping;
+  assert.equal(r.requests.length, 1); assert.deepEqual(r.toasts, []);
+  await r.handlers.input(input("回退后的新消息")); await r.time.advance(500); await settle();
+  assert.deepEqual(r.requests.map(request => request.input.text), ["旧对话正在生成", "回退后的新消息"]);
 });
 
 /** Creates a minimal persistent native Compose context with inspectable actual nodes. */

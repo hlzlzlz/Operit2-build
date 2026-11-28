@@ -165,6 +165,8 @@ See [`BUILDING.md`](BUILDING.md) for complete environment, signing, release, and
 
 Terminal profiles and other application settings can be managed from the CLI.
 See [CLI settings and UI parity](docs/cli-settings.md) for commands and Windows WSL examples.
+See [CLI workspaces](docs/cli-workspaces.md) to create a workspace, mount the current
+folder, and bind chats by workspace ID.
 
 Run from the repository root:
 
@@ -259,6 +261,10 @@ If you modify cross-device capabilities, try to preserve these three boundaries:
 3. Features may evolve, but the continuity of the user's tasks and recoverable records must not be silently lost.
 
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before getting started. For changes involving protocols, persistence, Binding, Host capabilities, or plugin contracts, also update the corresponding architecture documentation and tests.
+
+Contributors must sign the [`Contributor License Agreement (CLA)`](CLA.md) using the process described there. You retain copyright and grant the maintainer rights to sublicense your contributions under open-source or proprietary commercial licenses. The CLA also covers patent licensing and transfer of the granted rights to a future project operator. Earlier contributions require explicit consent to be covered by the CLA.
+
+See the [contributors page](https://github.com/AAswordman/Operit2/graphs/contributors) for the current list of contributors.
 
 ## License
 

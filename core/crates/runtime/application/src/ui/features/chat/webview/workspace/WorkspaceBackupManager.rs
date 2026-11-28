@@ -10,6 +10,7 @@ use crate::ui::features::chat::webview::workspace::process::GitIgnoreFilter::Git
 use operit_host_api::HostManager::HostManager;
 use operit_vfs::VfsPath;
 use operit_vfs::VisualFileSystem::VisualFileSystem;
+use operit_tools::tools::AIToolHandler::AIToolHandler;
 use operit_tools::tools::AIToolHook::AIToolHook;
 use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::AITool;
@@ -115,6 +116,65 @@ enum Capture {
     Unknown,
 }
 
+/// The hook-registry surface needed to unregister one workspace hook session.
+pub trait ToolHookRegistry {
+    #[allow(non_snake_case)]
+    fn removeToolHook(&mut self, hookId: &str);
+}
+
+impl ToolHookRegistry for AIToolHandler {
+    /// Removes the exact turn's hook from the shared handler.
+    fn removeToolHook(&mut self, hookId: &str) {
+        AIToolHandler::removeToolHook(self, hookId);
+    }
+}
+
+/// Owns one registration shared with the chat's explicit cancellation path.
+pub struct WorkspaceToolHookRegistration<R: ToolHookRegistry> {
+    session: Mutex<Option<(Arc<WorkspaceToolHookSession>, R)>>,
+}
+
+impl<R: ToolHookRegistry> std::fmt::Debug for WorkspaceToolHookRegistration<R> {
+    /// Keeps runtime diagnostics independent of the tool handler's internal state.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WorkspaceToolHookRegistration").finish_non_exhaustive()
+    }
+}
+
+impl<R: ToolHookRegistry> WorkspaceToolHookRegistration<R> {
+    /// Unregisters and finalizes once, serializing concurrent completion and cancellation.
+    pub fn close(&self) {
+        let mut registration = self.session.lock().expect("workspace hook registration mutex poisoned");
+        if let Some((session, mut handler)) = registration.take() {
+            handler.removeToolHook(session.hookId());
+            session.close();
+        }
+    }
+}
+
+/// Carries cleanup ownership through preparation, queued dispatch and stream collection.
+pub struct WorkspaceToolHookDropGuard<R: ToolHookRegistry> {
+    pub registration: Arc<WorkspaceToolHookRegistration<R>>,
+}
+
+impl<R: ToolHookRegistry> WorkspaceToolHookDropGuard<R> {
+    /// Binds the session and its registry before any asynchronous handoff.
+    pub fn new(session: Option<Arc<WorkspaceToolHookSession>>, handler: R) -> Self {
+        Self {
+            registration: Arc::new(WorkspaceToolHookRegistration {
+                session: Mutex::new(session.map(|session| (session, handler))),
+            }),
+        }
+    }
+}
+
+impl<R: ToolHookRegistry> Drop for WorkspaceToolHookDropGuard<R> {
+    /// Cleans up even when a scheduler drops the closure or an unpolled future.
+    fn drop(&mut self) {
+        self.registration.close();
+    }
+}
+
 impl WorkspaceBackupManager {
     pub fn new(context: HostManager) -> Self {
         Self { context }
@@ -133,9 +193,13 @@ impl WorkspaceBackupManager {
         chatId: Option<String>,
     ) -> Arc<WorkspaceToolHookSession> {
         Arc::new(WorkspaceToolHookSession {
+            // Unique per session: continuation turns reuse the user message
+            // timestamp, and `addToolHook` deduplicates by hook id, so a shared
+            // id would keep a stale hook registered instead of the new one.
             id: format!(
-                "workspace-backup-{}-{messageTimestamp}",
-                normalizeChatScope(chatId.as_deref())
+                "workspace-backup-{}-{messageTimestamp}-{}",
+                normalizeChatScope(chatId.as_deref()),
+                uuid::Uuid::new_v4()
             ),
             manager: self.clone(),
             workspacePath,
@@ -1153,6 +1217,192 @@ mod tests {
             &affected,
             "/operitapp/workspaces/w/other.rs"
         ));
+    }
+
+    /// Records hook removals so guard tests can assert unregistration without
+    /// constructing a full AIToolHandler runtime.
+    #[derive(Clone, Default)]
+    struct RecordingHookRegistry {
+        removedHookIds: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ToolHookRegistry for RecordingHookRegistry {
+        fn removeToolHook(&mut self, hookId: &str) {
+            self.removedHookIds.lock().unwrap().push(hookId.to_string());
+        }
+    }
+
+    fn editTool(path: &str) -> AITool {
+        AITool {
+            name: "edit_file".to_string(),
+            parameters: vec![ToolParameter {
+                name: "path".to_string(),
+                value: path.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn drop_guard_removes_hook_and_finalizes_session_when_worker_is_dropped() {
+        let fixture = BackupFixture::new();
+        let manager = &fixture.manager;
+        let vfs = manager.vfs();
+        let workspace = "/operitapp/workspaces/guard-drop";
+        vfs.makeDirectory(workspace, true).unwrap();
+        let file = joinPath(workspace, "main.rs");
+        vfs.writeFile(&file, "before\n", false).unwrap();
+        let session = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            100,
+            Some("chat-guard".into()),
+        );
+        let registry = RecordingHookRegistry::default();
+        session.onToolExecutionStarted(&editTool(&file));
+        vfs.writeFile(&file, "after\n", false).unwrap();
+
+        // Simulates the worker future being dropped mid-stream: the guard is
+        // its local and drops without the completion path ever running.
+        {
+            let _guard = WorkspaceToolHookDropGuard::new(Some(session.clone()), registry.clone());
+        }
+
+        assert_eq!(
+            *registry.removedHookIds.lock().unwrap(),
+            vec![session.hookId().to_string()]
+        );
+        let snapshot = manager
+            .loadTurnSnapshot(&vfs, workspace, Some("chat-guard"))
+            .expect("dropped worker must still finalize its turn snapshot");
+        assert_eq!(snapshot.turnTimestamp, 100);
+        assert!(snapshot.files.contains_key("main.rs"));
+    }
+
+    /// Closes queued closures, unpolled futures and futures suspended during collection.
+    #[tokio::test]
+    async fn queued_and_running_task_drop_remove_hooks() {
+        let fixture = BackupFixture::new();
+        for stage in 0..3 {
+            let session = fixture.manager.createWorkspaceToolHookSession(
+                "/operitapp/workspaces/queued".into(), 100, Some("queued-chat".into()),
+            );
+            let registry = RecordingHookRegistry::default();
+            let guard = WorkspaceToolHookDropGuard::new(Some(session.clone()), registry.clone());
+            let task: operit_host_api::HostRuntimeAsyncTask = Box::new(move || Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            }));
+            if stage == 0 {
+                drop(task);
+            } else {
+                let mut future = task();
+                if stage == 2 {
+                    assert!(futures_util::poll!(&mut future).is_pending());
+                }
+                drop(future);
+            }
+            assert_eq!(*registry.removedHookIds.lock().unwrap(), vec![session.hookId().to_string()]);
+            assert!(session.closed.load(Ordering::SeqCst));
+        }
+    }
+
+    /// Makes explicit completion and a later guard drop share one finalization.
+    #[test]
+    fn explicit_close_and_guard_drop_unregister_once() {
+        let fixture = BackupFixture::new();
+        let manager = &fixture.manager;
+        let vfs = manager.vfs();
+        let workspace = "/operitapp/workspaces/guard-complete";
+        vfs.makeDirectory(workspace, true).unwrap();
+        let file = joinPath(workspace, "main.rs");
+        vfs.writeFile(&file, "before\n", false).unwrap();
+        let session = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            100,
+            Some("chat-complete".into()),
+        );
+        let registry = RecordingHookRegistry::default();
+        session.onToolExecutionStarted(&editTool(&file));
+        vfs.writeFile(&file, "after\n", false).unwrap();
+
+        let guard = WorkspaceToolHookDropGuard::new(Some(session.clone()), registry.clone());
+        guard.registration.close();
+        let statePath = manager.statePath(workspace, Some("chat-complete"));
+        let finalized = vfs.readFile(&statePath).unwrap();
+
+        drop(guard);
+        assert_eq!(*registry.removedHookIds.lock().unwrap(), vec![session.hookId().to_string()]);
+        assert_eq!(vfs.readFile(&statePath).unwrap(), finalized);
+    }
+
+    /// Finishes cancellation before the next turn and rejects late callbacks from the old hook.
+    #[test]
+    fn cancelled_session_cannot_modify_the_next_turn_snapshot() {
+        let fixture = BackupFixture::new();
+        let manager = &fixture.manager;
+        let vfs = manager.vfs();
+        let workspace = "/operitapp/workspaces/cancelled";
+        vfs.makeDirectory(workspace, true).unwrap();
+        let oldFile = joinPath(workspace, "old.rs");
+        let newFile = joinPath(workspace, "new.rs");
+        vfs.writeFile(&oldFile, "v1\n", false).unwrap();
+        let session1 = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            100,
+            Some("chat-cancelled".into()),
+        );
+        session1.onToolExecutionStarted(&editTool(&oldFile));
+        vfs.writeFile(&oldFile, "v2\n", false).unwrap();
+        let guard = WorkspaceToolHookDropGuard::new(Some(session1.clone()), RecordingHookRegistry::default());
+        // Cancellation finalizes the session before the chat admits its next turn.
+        guard.registration.close();
+        let session2 = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            200,
+            Some("chat-cancelled".into()),
+        );
+        // The previous snapshot remains available until the next editing turn begins.
+        let snapshot = manager
+            .loadTurnSnapshot(&vfs, workspace, Some("chat-cancelled"))
+            .unwrap();
+        assert_eq!(snapshot.turnTimestamp, 100);
+        assert!(snapshot.files.contains_key("old.rs"));
+
+        session2.onToolExecutionStarted(&editTool(&newFile));
+        // A previously captured hook reference receives its callback after cancellation.
+        session1.onToolExecutionStarted(&editTool(&newFile));
+        vfs.writeFile(&newFile, "created\n", false).unwrap();
+        session2.close();
+        // A late worker drop must not finalize the old snapshot again.
+        drop(guard);
+
+        let snapshot = manager
+            .loadTurnSnapshot(&vfs, workspace, Some("chat-cancelled"))
+            .expect("turn 2 snapshot must survive the stale session");
+        assert_eq!(snapshot.turnTimestamp, 200);
+        assert_eq!(
+            snapshot.files.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["new.rs"],
+            "turn 2 snapshot must not mix in turn 1's files"
+        );
+    }
+
+    #[test]
+    fn continuation_sessions_get_unique_hook_ids() {
+        let fixture = BackupFixture::new();
+        let manager = &fixture.manager;
+        let workspace = "/operitapp/workspaces/continuation";
+        // Continuation turns reuse the same user message timestamp.
+        let first = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            100,
+            Some("chat-cont".into()),
+        );
+        let second = manager.createWorkspaceToolHookSession(
+            workspace.into(),
+            100,
+            Some("chat-cont".into()),
+        );
+        assert_ne!(first.hookId(), second.hookId());
     }
 
     #[test]

@@ -18,9 +18,17 @@ export interface JsonResultData {
 }
 
 /**
+ * Preserves independent display and model projections for any tool result.
+ */
+export interface PresentedResultData {
+  display: ToolResultData;
+  model: ToolResultData;
+}
+
+/**
  * Contains every concrete payload returned by the built-in tool runtime.
  */
-export type ToolResultData = UIPageResultData | UIActionResultData | JsonResultData | EdgePortResultData | BooleanResultData | StringResultData | SleepResultData | EnvironmentVariableReadResultData | EnvironmentVariableWriteResultData | ModelsListSummariesResultData | TtsSynthesizeResultData | TtsSpeakResultData | SttTranscribeResultData | TtsListConfigsResultData | TtsGetCurrentConfigIdResultData | TtsSetCurrentConfigIdResultData | ThemeListConfigsResultData | ThemeApplyConfigResultData | IntResultData | BinaryResultData | FilePartContentData | DirectoryListingData | FileContentData | BinaryFileContentData | FileExistsData | FileInfoData | FileOperationData | FileApplyResultData | StorageRequestResultData | WebSocketResultData | HttpResponseData | HttpStreamEventData | SystemSettingData | AppOperationData | AppListData | AppUsageTimeResultData | NotificationData | LocationData | DeviceInfoResultData | ChatServiceStartResultData | ChatCreationResultData | ChatListResultData | ChatFindResultData | AgentStatusResultData | ChatSwitchResultData | ChatTitleUpdateResultData | ChatDeleteResultData | MessageSendResultData | ChatSendMessageResultData | ChatObservationResultData | ChatPreparedDeliveryResultData | ChatScheduledMessagesResultData | ChatScheduleMessageResultData | ChatCancelScheduledMessageResultData | ChatCancelResultData | ChatReadExtensionResultData | ChatWriteExtensionResultData | ChatDeleteExtensionResultData | ChatCallResultData | ChatMessagesResultData | VisitWebResultData | TerminalInfoResultData | TerminalCommandResultData | TerminalStreamEventData | TerminalObservationResultData | HiddenTerminalCommandResultData | TerminalSessionCreationResultData | TerminalSessionCloseResultData | TerminalSessionScreenResultData | MusicPlaybackResultData | BluetoothStateData | BluetoothBondedDevicesData | BluetoothScanResultData | BluetoothSessionData | BluetoothTransferData | BluetoothReadData | BluetoothBleServicesData | BluetoothBleNotificationData | CatalogReadToolSourcesResultData | MediaRegistrationResultData | FindFilesResultData | GrepResultData;
+export type ToolResultData = PresentedResultData | UIPageResultData | UIActionResultData | JsonResultData | EdgePortResultData | BooleanResultData | StringResultData | SleepResultData | EnvironmentVariableReadResultData | EnvironmentVariableWriteResultData | ModelsListSummariesResultData | TtsSynthesizeResultData | TtsSpeakResultData | SttTranscribeResultData | TtsListConfigsResultData | TtsGetCurrentConfigIdResultData | TtsSetCurrentConfigIdResultData | ThemeListConfigsResultData | ThemeApplyConfigResultData | IntResultData | BinaryResultData | FilePartContentData | DirectoryListingData | FileContentData | BinaryFileContentData | FileExistsData | FileInfoData | FileOperationData | FileApplyResultData | StorageRequestResultData | WebSocketResultData | HttpResponseData | HttpStreamEventData | SystemSettingData | AppOperationData | AppListData | AppUsageTimeResultData | NotificationData | LocationData | DeviceInfoResultData | ChatServiceStartResultData | ChatCreationResultData | ChatListResultData | ChatFindResultData | AgentStatusResultData | ChatSwitchResultData | ChatTitleUpdateResultData | ChatDeleteResultData | MessageSendResultData | ChatSendMessageResultData | ChatObservationResultData | ChatPreparedDeliveryResultData | ChatScheduledMessagesResultData | ChatScheduleMessageResultData | ChatCancelScheduledMessageResultData | ChatCancelResultData | ChatReadExtensionResultData | ChatWriteExtensionResultData | ChatDeleteExtensionResultData | ChatCallResultData | ChatMessagesResultData | VisitWebResultData | TerminalInfoResultData | TerminalCommandResultData | TerminalStreamEventData | TerminalObservationResultData | HiddenTerminalCommandResultData | TerminalSessionCreationResultData | TerminalSessionCloseResultData | TerminalSessionScreenResultData | MusicPlaybackResultData | BluetoothStateData | BluetoothBondedDevicesData | BluetoothScanResultData | BluetoothSessionData | BluetoothTransferData | BluetoothReadData | BluetoothBleServicesData | BluetoothBleNotificationData | CatalogReadToolSourcesResultData | MediaRegistrationResultData | FindFilesResultData | GrepResultData;
 
 /**
  * Captures the UI node and Android surface reached when an automation run finishes.
@@ -166,7 +174,7 @@ export type TerminalType = "powershell" | "bash" | "zsh" | "shell";
 /**
  * Identifies the concrete terminal implementation selected by a host.
  */
-export type TerminalImplementation = "native" | "proot" | "chroot" | "android-system" | "adb" | "shell" | "arm64" | "qemu-vroot" | "v86";
+export type TerminalImplementation = "native" | "proot" | "termux" | "chroot" | "android-system" | "adb" | "shell" | "arm64" | "qemu-vroot" | "v86";
 
 /**
  * Reports the start or an incremental chunk of a streamed chat-message response.
@@ -1070,7 +1078,7 @@ export interface ChatScheduledMessage {
   chatId: string;
   timestamp: number;
   /**
-   * preparing, scheduled, delivered, cancelled, invalidated, skipped, or failed.
+   * preparing, scheduled, delivered, cancelled, invalidated, skipped, or failed. Delivered confirms persistence, not UI visibility.
    */
   status: string;
   error: string | null;
@@ -1078,6 +1086,18 @@ export interface ChatScheduledMessage {
    * Contains the accepted prepared body, including host-generated replies.
    */
   text: string;
+  /**
+   * Reports whether notification delivery or registration was requested; old receipts may lack this evidence.
+   */
+  notificationAttempted: boolean;
+  /**
+   * Reports Host acceptance, not system display or user visibility.
+   */
+  notificationRegistered: boolean;
+  /**
+   * Contains notification failure independently of message persistence.
+   */
+  notificationError: string | null;
 }
 
 export interface ChatScheduleMessageResultData {
@@ -1816,7 +1836,7 @@ export interface EdgePortResultData {
 /**
  * Exchanges one scoped terminal execution observation through the common tool transport.
  */
-export type TerminalObservationResultData = { result: TerminalCommandResultData; } | { handle: string; } | { event: TerminalExecEvent | null; } | { };
+export type TerminalObservationResultData = { result: TerminalSessionCreationResultData; } | { result: TerminalCommandResultData; } | { handle: string; } | { event: TerminalExecEvent | null; } | { };
 
 /**
  * Reports exactly the requested WebSocket operation.

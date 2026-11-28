@@ -13,6 +13,7 @@ import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart' as core;
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
 import 'package:operit2/l10n/generated/app_localizations.dart';
 import 'package:operit2/ui/common/ApiErrorText.dart';
+import 'package:operit2/ui/common/components/M3LoadingIndicator.dart';
 import 'package:operit2/ui/common/contributions/ToolPkgChatUiCatalog.dart';
 import 'package:operit2/ui/features/settings/model/ModelSettingsPanel.dart';
 import 'package:operit2/ui/features/chat/components/style/input/agent/AgentChatInputSection.dart';
@@ -20,6 +21,7 @@ import 'package:operit2/ui/features/chat/components/style/input/agent/AgentModel
 import 'package:operit2/ui/features/chat/viewmodel/ChatViewModel.dart';
 import 'package:operit2/ui/features/settings/model/ProviderLogo.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
+import 'support/chat_voice_input_session.dart';
 
 /// Describes one authenticated model participant for the Core bridge fixture.
 Map<String, Object?> _participantModel({required bool followsGlobal}) => {
@@ -30,6 +32,53 @@ Map<String, Object?> _participantModel({required bool followsGlobal}) => {
 };
 
 void main() {
+  testWidgets(
+    'local gateway can be selected and saved with its device routing hint',
+    (tester) async {
+      final bridge = _ModelSettingsBridge();
+      final key = GlobalKey<ModelSettingsPanelState>();
+      await _pumpModelSettings(tester, bridge, key);
+      final l10n = AppLocalizations.of(key.currentContext!)!;
+      await tester.tap(find.text('Test Provider'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip(l10n.settingsModelEditProvider));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find
+            .text(
+              l10n.settingsModelProviderTypeOption(
+                l10n.settingsModelProviderTypeOpenai,
+                'OpenAI',
+              ),
+            )
+            .last,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find
+            .text(
+              l10n.settingsModelProviderTypeOption(
+                l10n.settingsModelProviderTypeLocalGateway,
+                'Local Gateway',
+              ),
+            )
+            .last,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.settingsModelLocalGatewayHint), findsOneWidget);
+      expect(find.text('http://127.0.0.1:8000/v1/responses'), findsOneWidget);
+      await tester.tap(find.text(l10n.save).last);
+      await tester.pumpAndSettle();
+      expect(bridge.savedProvider?.providerTypeId, 'LOCAL_GATEWAY');
+      expect(
+        bridge.savedProvider?.endpoint,
+        'http://127.0.0.1:8000/v1/responses',
+      );
+      expect(bridge.savedProvider?.models.single.id, 'test-model');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'thinking changes refresh the open composer model popup without dismissing it',
     (tester) async {
@@ -53,9 +102,7 @@ void main() {
               onSendMessage: () {},
               onQueueMessage: () {},
               onCancelMessage: () {},
-              isSpeechRecording: false,
-              isSpeechTranscribing: false,
-              onSpeechInput: () {},
+              voiceInput: createIdleVoiceInputSession(),
             ),
           ),
         ),
@@ -97,7 +144,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Test Provider').first);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('test-model').last);
+      await tester.tap(find.text('Test Model').last);
       await tester.pumpAndSettle();
       expect(popup, findsNothing);
       expect(bridge.modelSelectionWrites, 1);
@@ -137,7 +184,7 @@ void main() {
         expect(tester.takeException(), isNull);
         await tester.tap(find.text('Test Provider').first);
         await tester.pumpAndSettle();
-        await tester.tap(find.text('test-model').last);
+        await tester.tap(find.text('Test Model').last);
         await tester.pumpAndSettle();
         expect(selectedModel, 'test-model');
         final chatId = missingProvider ? 'created-chat' : 'existing-chat';
@@ -187,7 +234,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Test Provider').first);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('test-model').last);
+    await tester.tap(find.text('Test Model').last);
     await tester.pumpAndSettle();
     expect(bridge.chatBindings['embedded-chat']?.modelId, 'test-model');
     expect(bridge.chatBinding.modelId, 'global-model');
@@ -219,8 +266,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(bridge.requestedModelChatId, 'fixed-chat');
-      expect(find.text('test-model'), findsOneWidget);
-      expect(find.text('expensive-global-model'), findsNothing);
+      expect(find.text('Test Model'), findsOneWidget);
+      expect(find.text('Expensive Global Model'), findsNothing);
       expect(find.textContaining('固定模型'), findsWidgets);
       expect(bridge.thinkingCalls, 1);
       expect(bridge.modelSelectionWrites, 0);
@@ -249,7 +296,7 @@ void main() {
       await tester.tap(find.text('Test Provider').first);
       await tester.pumpAndSettle();
       bridge.participantModels = [_participantModel(followsGlobal: false)];
-      await tester.tap(find.text('test-model').last);
+      await tester.tap(find.text('Test Model').last);
       await tester.pumpAndSettle();
       expect(bridge.modelSelectionWrites, 0);
       expect(find.textContaining('当前会话包含固定模型'), findsOneWidget);
@@ -285,8 +332,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('test-model'), findsOneWidget);
-      expect(find.text('second-model'), findsOneWidget);
+      expect(find.text('Test Model'), findsOneWidget);
+      expect(find.text('Second Model'), findsOneWidget);
       expect(bridge.thinkingCalls, 0);
       expect(bridge.modelSelectionWrites, 0);
       expect(tester.takeException(), isNull);
@@ -326,17 +373,15 @@ void main() {
                 onSendMessage: () {},
                 onQueueMessage: () {},
                 onCancelMessage: () {},
-                isSpeechRecording: false,
-                isSpeechTranscribing: false,
-                onSpeechInput: () {},
+                voiceInput: createIdleVoiceInputSession(),
               );
             },
           ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('固定 · test-model'), findsOneWidget);
-      expect(find.text('global-model'), findsNothing);
+      expect(find.text('固定 · Test Model'), findsOneWidget);
+      expect(find.text('Global Model'), findsNothing);
       bridge.participantModels = [
         {
           'id': 'model:chat',
@@ -350,8 +395,8 @@ void main() {
       ];
       update(() => chatId = 'global-chat');
       await tester.pumpAndSettle();
-      expect(find.text('global-model'), findsOneWidget);
-      expect(find.text('固定 · test-model'), findsNothing);
+      expect(find.text('Global Model'), findsOneWidget);
+      expect(find.text('固定 · Test Model'), findsNothing);
       expect(bridge.requestedModelChatId, 'global-chat');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -413,6 +458,27 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  testWidgets('model picker opens with a loading indicator immediately', (
+    tester,
+  ) async {
+    final gate = Completer<void>();
+    final bridge = _ModelSettingsBridge()..availableModelsGate = gate;
+    final panelKey = GlobalKey<ModelSettingsPanelState>();
+    await _pumpModelSettings(tester, bridge, panelKey);
+    final l10n = AppLocalizations.of(panelKey.currentContext!)!;
+    await tester.tap(find.text('Test Provider'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip(l10n.settingsModelAddModel));
+    await tester.pump();
+    expect(find.byType(Dialog), findsWidgets);
+    expect(find.byType(M3LoadingIndicator), findsOneWidget);
+    expect(find.text('New Model'), findsNothing);
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byType(M3LoadingIndicator), findsNothing);
+    expect(find.text('New Model'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   for (final downloadedAt in <int?>[null, 1794000000000]) {
     testWidgets(
       'catalog update failure keeps model picker usable at $downloadedAt',
@@ -425,7 +491,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip(l10n.settingsModelAddModel));
         await tester.pumpAndSettle();
-        expect(find.text('new-model'), findsOneWidget);
+        expect(find.text('New Model'), findsOneWidget);
         expect(find.textContaining('fixture catalog offline'), findsNothing);
         if (downloadedAt == null) {
           expect(find.text(l10n.settingsModelCatalogBundled), findsOneWidget);
@@ -433,12 +499,147 @@ void main() {
         await tester.tap(find.text(l10n.settingsModelCatalogRetry));
         await tester.pumpAndSettle();
         expect(bridge.catalogRefreshCalls, 1);
-        expect(find.text('new-model'), findsOneWidget);
+        expect(find.text('New Model'), findsOneWidget);
         expect(find.textContaining('fixture catalog offline'), findsNothing);
         expect(tester.takeException(), isNull);
       },
     );
   }
+  testWidgets(
+    'sync provider models replaces stale non-custom models and preserves custom models',
+    (tester) async {
+      final bridge = _ModelSettingsBridge();
+      bridge.overrideModels = [
+        bridge.buildModel('stale-model'),
+        bridge.buildModel('custom-model', custom: true),
+      ];
+      bridge.syncHandler = (_) {
+        bridge.overrideModels = [
+          bridge.buildModel('custom-model', custom: true),
+          bridge.buildModel('fresh-model'),
+        ];
+        return const core.ProviderModelSyncResult(
+          addedCount: 1,
+          removedCount: 1,
+          keptCustomCount: 1,
+          totalCount: 2,
+          bindingAdjustments: [],
+        );
+      };
+      final panelKey = GlobalKey<ModelSettingsPanelState>();
+      await _pumpModelSettings(tester, bridge, panelKey);
+      final l10n = AppLocalizations.of(panelKey.currentContext!)!;
+      await tester.tap(find.text('Test Provider'));
+      await tester.pumpAndSettle();
+      expect(find.text('Stale Model'), findsOneWidget);
+      expect(find.text('Custom Model'), findsOneWidget);
+      expect(find.text(l10n.settingsModelCustomBadge), findsOneWidget);
+
+      await tester.tap(find.text(l10n.settingsModelSyncModels));
+      await tester.pumpAndSettle();
+
+      expect(bridge.syncModelsCalls, 1);
+      expect(find.text('Stale Model'), findsNothing);
+      expect(find.text('Fresh Model'), findsOneWidget);
+      expect(find.text('Custom Model'), findsOneWidget);
+      expect(find.text(l10n.settingsModelCustomBadge), findsOneWidget);
+      expect(find.text(l10n.settingsModelSyncSummary(1, 1, 1)), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'sync provider models notifies binding switches and missing replacements',
+    (tester) async {
+      final bridge = _ModelSettingsBridge();
+      bridge.syncHandler = (_) {
+        bridge.overrideModels = [bridge.buildModel('fresh-model')];
+        bridge.chatBinding = const core.FunctionModelBinding(
+          providerId: 'test-provider',
+          modelId: 'fresh-model',
+          followsChat: false,
+        );
+        return const core.ProviderModelSyncResult(
+          addedCount: 1,
+          removedCount: 1,
+          keptCustomCount: 0,
+          totalCount: 1,
+          bindingAdjustments: [
+            core.ModelBindingAdjustment(
+              functionType: core.FunctionType.chat,
+              previousModelId: 'test-model',
+              newModelId: 'fresh-model',
+            ),
+          ],
+        );
+      };
+      final panelKey = GlobalKey<ModelSettingsPanelState>();
+      await _pumpModelSettings(tester, bridge, panelKey);
+      final l10n = AppLocalizations.of(panelKey.currentContext!)!;
+      await tester.tap(find.text('Test Provider'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(l10n.settingsModelSyncModels));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(l10n.settingsModelSyncSwitchedBinding(1, 1, 'fresh-model')),
+        findsOneWidget,
+      );
+
+      bridge.syncHandler = (_) {
+        bridge.overrideModels = const [];
+        return const core.ProviderModelSyncResult(
+          addedCount: 0,
+          removedCount: 1,
+          keptCustomCount: 0,
+          totalCount: 0,
+          bindingAdjustments: [
+            core.ModelBindingAdjustment(
+              functionType: core.FunctionType.chat,
+              previousModelId: 'fresh-model',
+              newModelId: null,
+            ),
+          ],
+        );
+      };
+      await tester.tap(find.text(l10n.settingsModelSyncModels));
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.settingsModelSyncMissingBinding(1)), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'sync failure dialog offers custom model input and shows created model',
+    (tester) async {
+      final bridge = _ModelSettingsBridge()
+        ..syncModelsError = 'HTTP 502 bad gateway';
+      final panelKey = GlobalKey<ModelSettingsPanelState>();
+      await _pumpModelSettings(tester, bridge, panelKey);
+      final l10n = AppLocalizations.of(panelKey.currentContext!)!;
+      await tester.tap(find.text('Test Provider'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(l10n.settingsModelSyncModels));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text(l10n.settingsModelCustomModel),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextFormField), 'manual-model');
+      await tester.tap(find.text(l10n.save));
+      await tester.pumpAndSettle();
+
+      expect(bridge.createdCustomModels, [('test-provider', 'manual-model')]);
+      expect(find.text('Manual Model'), findsOneWidget);
+      expect(find.text(l10n.settingsModelCustomBadge), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
   for (final success in [true, false]) {
     testWidgets(
       'completed ${success ? 'passed' : 'failed'} connection checks restore after reopening settings',
@@ -613,7 +814,7 @@ void main() {
 
       await tester.tap(find.text('Test Provider'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('test-model').last);
+      await tester.tap(find.text('Test Model').last);
       await tester.pumpAndSettle();
       // A capability saves as soon as it is switched.
       await tester.tap(find.text(l10n.settingsModelCapabilityImage).last);
@@ -731,14 +932,12 @@ void main() {
             onSendMessage: () {},
             onQueueMessage: () {},
             onCancelMessage: () {},
-            isSpeechRecording: false,
-            isSpeechTranscribing: false,
-            onSpeechInput: () {},
+            voiceInput: createIdleVoiceInputSession(),
           ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('deepseek-flash'), findsOneWidget);
+      expect(find.text('Deepseek Flash'), findsOneWidget);
       ProviderLogo logo() =>
           tester.widget<ProviderLogo>(find.byType(ProviderLogo).first);
       expect(logo().providerTypeId, isEmpty);
@@ -748,14 +947,14 @@ void main() {
       bridge.modelId = bridge.chatBinding.modelId;
       bridge.emitProfiles();
       await tester.pumpAndSettle();
-      expect(find.text('deepseek-flash'), findsOneWidget);
+      expect(find.text('Deepseek Flash'), findsOneWidget);
       expect(logo().providerTypeId, 'OPENAI');
       expect(logo().fallbackName, 'Test Provider');
       expect(bridge.resolutionCalls, 0);
 
       bridge.emitBindings(const {});
       await tester.pumpAndSettle();
-      expect(find.text('deepseek-flash'), findsNothing);
+      expect(find.text('Deepseek Flash'), findsNothing);
       expect(find.text('模型配置不可用'), findsOneWidget);
       expect(logo().providerTypeId, isEmpty);
       expect(tester.takeException(), isNull);
@@ -800,12 +999,16 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
   bool missingChatBinding = false;
   List<Map<String, Object?>>? participantModels;
   String? requestedModelChatId;
-  int? catalogUpdatedAt;
-  int catalogRefreshCalls = 0;
+  List<core.ModelProfile>? overrideModels;
+  core.ProviderModelSyncResult Function(String providerId)? syncHandler;
+  String? syncModelsError;
+  int syncModelsCalls = 0;
+  final List<(String, String)> createdCustomModels = [];
   bool connectionTestSucceeds = true;
   String connectionTestError = 'HTTP 503';
   int connectionTestCalls = 0;
   Completer<void>? connectionTestGate;
+  Completer<void>? availableModelsGate;
   List<Map<String, Object?>> savedConnectionTests = [];
   core.ModelCapabilities capabilities = const core.ModelCapabilities(
     directImage: false,
@@ -836,30 +1039,34 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
     llamaKvUnified: false,
     llamaOffloadKqv: false,
   );
-  static const contextSpec = core.ModelContextSpec(maxContextLength: 200);
+  static const contextSpec = core.ModelContextSpec(maxContextTokens: 200_000);
 
-  core.ModelProfile get model => core.ModelProfile(
-    id: modelId,
-    pricingOverride: null,
-    contextOverride: contextSpec,
-    capabilitiesOverride: core.ModelCapabilityOverrides(
-      directImage: capabilities.directImage,
-      directAudio: capabilities.directAudio,
-      directVideo: capabilities.directVideo,
-      toolCall: capabilities.toolCall,
-    ),
-    builtinToolsOverride: const [],
-    requestOverride: const core.ModelRequestOverrides(
-      supportsStructuredTools: null,
-      enableClaude1HPromptCache: null,
-    ),
-    listed: null,
-    thinkingOverride: null,
-    thinkingLevel: null,
-    parameters: const [],
-    summary: summarySettings,
-    localRuntime: localRuntime,
-  );
+  core.ModelProfile buildModel(String id, {bool custom = false}) =>
+      core.ModelProfile(
+        id: id,
+        custom: custom,
+        pricingOverride: null,
+        contextOverride: contextSpec,
+        capabilitiesOverride: core.ModelCapabilityOverrides(
+          directImage: capabilities.directImage,
+          directAudio: capabilities.directAudio,
+          directVideo: capabilities.directVideo,
+          toolCall: capabilities.toolCall,
+        ),
+        builtinToolsOverride: const [],
+        requestOverride: const core.ModelRequestOverrides(
+          supportsStructuredTools: null,
+          enableClaude1HPromptCache: null,
+        ),
+        listed: null,
+        thinkingOverride: null,
+        thinkingLevel: null,
+        parameters: const [],
+        summary: summarySettings,
+        localRuntime: localRuntime,
+      );
+
+  core.ModelProfile get model => buildModel(modelId);
 
   core.ProviderProfile get provider =>
       savedProvider ??
@@ -877,7 +1084,7 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
         customHeaders: '{}',
         requestLimitPerMinute: 0,
         maxConcurrentRequests: 1,
-        models: [model],
+        models: overrideModels ?? [model],
       );
 
   core.ResolvedModelConfig get config => core.ResolvedModelConfig(
@@ -936,6 +1143,7 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
         requestedModelChatId = payload['chatId'] as String?;
         result = {'participants': participantModels};
       case 'getAvailableProviderModels':
+        await availableModelsGate?.future;
         result = [
           core.AvailableProviderModel(
             modelId: 'new-model',
@@ -953,11 +1161,42 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
       case 'getModelCatalogStatus':
         if (request.methodName == 'refreshModelCatalog') {
           catalogRefreshCalls++;
+      case 'syncProviderModels':
+        syncModelsCalls++;
+        if (syncModelsError != null) {
+          return encodeCoreLink([
+            1,
+            'COMMAND_ERROR',
+            syncModelsError,
+            null,
+            null,
+            null,
+          ]);
         }
-        result = core.ModelCatalogStatus(
-          updatedAt: catalogUpdatedAt,
-          lastError: 'fixture catalog offline',
-        ).toJson();
+        final args = request.args as Map;
+        final providerId = args['providerId'] as String;
+        final handler = syncHandler;
+        result =
+            (handler != null
+                    ? handler(providerId)
+                    : core.ProviderModelSyncResult(
+                        addedCount: 0,
+                        removedCount: 0,
+                        keptCustomCount: 0,
+                        totalCount: provider.models.length,
+                        bindingAdjustments: const [],
+                      ))
+                .toJson();
+      case 'createProviderModel':
+        final args = request.args as Map;
+        final providerId = args['providerId'] as String;
+        final addedModelId = args['modelId'] as String;
+        createdCustomModels.add((providerId, addedModelId));
+        overrideModels = [
+          ...provider.models,
+          buildModel(addedModelId, custom: true),
+        ];
+        result = addedModelId;
       case 'getModelBindingForFunction':
         if (missingChatBinding) throw StateError('No chat model binding');
         result = chatBinding.toJson();
@@ -988,22 +1227,23 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
         result = [provider.toJson()];
       case 'getAllModelSummaries':
         result = [
-          core.ProviderModelSummary(
-            providerId: binding.providerId,
-            providerName: provider.name,
-            providerTypeId: provider.providerTypeId,
-            endpoint: provider.endpoint,
-            modelId: modelId,
-            capabilities: capabilities,
-            context: contextSpec,
-            pricing: null,
-            thinking: const core.ModelThinkingSpec(
-              supported: false,
-              toggle: false,
-              efforts: [],
-              budget: null,
-            ),
-          ).toJson(),
+          for (final item in provider.models)
+            core.ProviderModelSummary(
+              providerId: binding.providerId,
+              providerName: provider.name,
+              providerTypeId: provider.providerTypeId,
+              endpoint: provider.endpoint,
+              modelId: item.id,
+              capabilities: capabilities,
+              context: contextSpec,
+              pricing: null,
+              thinking: const core.ModelThinkingSpec(
+                supported: false,
+                toggle: false,
+                efforts: [],
+                budget: null,
+              ),
+            ).toJson(),
         ];
       case 'getThinkingSettingsForModel':
         thinkingCalls++;
@@ -1099,6 +1339,14 @@ class _ModelSettingsBridge extends OperitRuntimeBridge {
                   providerTypeId: 'OPENAI',
                   displayName: 'OpenAI',
                   defaultEndpoint: 'https://example.com/v1',
+                  endpointOptions: [],
+                  operations: [],
+                  models: [],
+                ).toJson(),
+                const core.ProviderCatalogEntry(
+                  providerTypeId: 'LOCAL_GATEWAY',
+                  displayName: 'Local Gateway',
+                  defaultEndpoint: 'http://127.0.0.1:8000/v1/responses',
                   endpointOptions: [],
                   operations: [],
                   models: [],

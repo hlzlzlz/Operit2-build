@@ -6,10 +6,10 @@ use operit_model::OpenAIModels::ModelOption;
 use operit_model::PromptTurn::PromptTurn;
 use operit_model::ToolPrompt::ToolPrompt;
 use operit_util::stream::RevisableTextStream::{
-    empty_revisable_event_channel, with_event_channel, DelegatingRevisableSharedTextStream,
-    RevisableTextStreamLike,
+    collect_revised_text, collect_revised_text_observed, empty_revisable_event_channel,
+    with_event_channel, DelegatingRevisableSharedTextStream, RevisableTextStreamLike,
 };
-use operit_util::stream::Stream::{Stream, VecStream};
+use operit_util::stream::Stream::VecStream;
 
 use super::ThinkingDialect::RequestThinking;
 
@@ -41,6 +41,62 @@ pub struct TokenCounts {
     pub output: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtendedTokenCounts {
+    pub cache_write_input: i64,
+    pub reasoning: i64,
+}
+
+/// Extracts optional cache-write and reasoning token counts from OpenAI-style usage payloads.
+pub fn parse_extended_usage_counts(usage: &serde_json::Value) -> ExtendedTokenCounts {
+    let cache_write_input = usage
+        .get("cache_creation_input_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cache_write_tokens")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .or_else(|| {
+            usage
+                .pointer("/input_tokens_details/cache_write_tokens")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .or_else(|| {
+            let creation = usage.get("cache_creation")?;
+            let m5 = creation
+                .get("ephemeral_5m_input_tokens")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let h1 = creation
+                .get("ephemeral_1h_input_tokens")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            Some((m5 + h1).max(0))
+        })
+        .unwrap_or(0)
+        .max(0);
+    let reasoning = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            usage
+                .pointer("/output_tokens_details/reasoning_tokens")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .or_else(|| {
+            usage
+                .get("reasoning_tokens")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .unwrap_or(0)
+        .max(0);
+    ExtendedTokenCounts {
+        cache_write_input,
+        reasoning,
+    }
+}
+
 /// Error surface shared by all AI provider services.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum AiServiceError {
@@ -70,15 +126,19 @@ pub fn empty_response_stream() -> Box<dyn RevisableTextStreamLike> {
     response_stream_from_chunks(Vec::new())
 }
 
-/// Collects every chunk from a revisable response stream.
-pub async fn collect_stream_chunks(mut stream: Box<dyn RevisableTextStreamLike>) -> Vec<String> {
-    let mut chunks = Vec::new();
-    stream
-        .collect(&mut |chunk| {
-            chunks.push(chunk);
-        })
-        .await;
-    chunks
+/// Collects the accepted response, applying retries before exposing its final text.
+pub async fn collect_response_text(mut stream: Box<dyn RevisableTextStreamLike>) -> Result<String, AiServiceError> {
+    collect_revised_text(stream.as_mut()).await.map_err(AiServiceError::RequestFailed)
+}
+
+/// Collects the accepted response, reporting the first accepted chunk through `on_first_text`.
+pub async fn collect_response_text_observed(
+    mut stream: Box<dyn RevisableTextStreamLike>,
+    on_first_text: impl FnMut(),
+) -> Result<String, AiServiceError> {
+    collect_revised_text_observed(stream.as_mut(), on_first_text)
+        .await
+        .map_err(AiServiceError::RequestFailed)
 }
 
 /// Rejects a failed producer before interpreting any received text as a completed model round.
@@ -141,6 +201,16 @@ pub trait AIService: Send + Sync {
 
     /// Returns the accumulated output token count.
     fn output_token_count(&self) -> i64 {
+        0
+    }
+
+    /// Returns cache-write input tokens reported by the provider when available.
+    fn cache_write_input_token_count(&self) -> i64 {
+        0
+    }
+
+    /// Returns reasoning tokens reported by the provider when available.
+    fn reasoning_token_count(&self) -> i64 {
         0
     }
 

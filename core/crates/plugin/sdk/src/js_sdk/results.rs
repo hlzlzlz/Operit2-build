@@ -16,15 +16,24 @@ use super::tts::TtsConfig;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::borrow::Cow;
 
 /// Preserves an arbitrary JSON result without interpreting strings or discarding null values.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JsonResultData { pub value: serde_json::Value }
 
+/// Preserves independent display and model projections for any tool result.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PresentedResultData {
+    pub display: Box<ToolResultData>,
+    pub model: Box<ToolResultData>,
+}
+
 /// Contains every concrete payload returned by the built-in tool runtime.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "__type")]
 pub enum ToolResultData {
+    PresentedResultData(PresentedResultData),
     UIPageResultData(UIPageResultData),
     UIActionResultData(UIActionResultData),
     JsonResultData(JsonResultData),
@@ -110,6 +119,85 @@ pub enum ToolResultData {
 }
 
 impl ToolResultData {
+    /// Creates an explicit result presentation without changing either business value.
+    pub fn presented(display: Self, model: Self) -> Self {
+        Self::PresentedResultData(PresentedResultData {
+            display: Box::new(display), model: Box::new(model),
+        })
+    }
+
+    /// Decodes only an explicitly marked package presentation; legacy values remain ordinary JSON.
+    pub fn fromPackageValue(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        if value.get("$operitToolResult").is_some() {
+            let contract: super::core::ToolResultPresentation<serde_json::Value, serde_json::Value> =
+                serde_json::from_value(value)?;
+            return Ok(Self::presented(
+                Self::fromPresentationValue(contract.presentation.display),
+                Self::fromPresentationValue(contract.presentation.model),
+            ));
+        }
+        Ok(Self::JsonResultData(JsonResultData { value }))
+    }
+
+    /// Keeps strings as text and all other explicit presentation values as structured JSON.
+    fn fromPresentationValue(value: serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::String(value) => stringResultData(value),
+            value => Self::JsonResultData(JsonResultData { value }),
+        }
+    }
+
+    /// Returns the business result used by user renderers.
+    pub fn displayData(&self) -> &Self {
+        match self {
+            Self::PresentedResultData(data) => data.display.displayData(),
+            _ => self,
+        }
+    }
+
+    /// Recreates the public presentation envelope for JavaScript callers that forward package results.
+    pub fn presentationValue(&self) -> serde_json::Value {
+        match self {
+            Self::PresentedResultData(data) => serde_json::json!({
+                "$operitToolResult": {
+                    "display": data.display.toBusinessValue(),
+                    "model": data.model.toBusinessValue(),
+                }
+            }),
+            data => data.toBusinessValue(),
+        }
+    }
+
+    /// Selects model data while adapting the existing native file-result contract.
+    pub fn modelData(&self) -> Cow<'_, Self> {
+        match self {
+            Self::PresentedResultData(data) => data.model.modelData(),
+            Self::FileApplyResultData(data) => Cow::Owned(stringResultData(data.buildRequestContent())),
+            data => Cow::Borrowed(data),
+        }
+    }
+
+    /// Serializes business values without the native result's own serialization tag.
+    pub fn toBusinessValue(&self) -> serde_json::Value {
+        match self.displayData() {
+            Self::JsonResultData(data) => data.value.clone(),
+            Self::StringResultData(data) => serde_json::json!(data.value),
+            Self::BooleanResultData(data) => serde_json::json!(data.value),
+            Self::IntResultData(data) => serde_json::json!(data.value),
+            Self::BinaryResultData(data) => serde_json::json!(format!("Binary data ({} bytes)", data.value.len())),
+            data => {
+                let mut value = serde_json::to_value(data).expect("Tool result must serialize");
+                value.as_object_mut().expect("Native result is an object").remove("__type");
+                value
+            }
+        }
+    }
+
+    /// Projects a result into model context independently of its user-facing rendering.
+    pub fn toModelString(&self) -> String {
+        self.modelData().toString()
+    }
+
     /// Serializes the tagged tool result into JSON.
     #[allow(non_snake_case)]
     pub fn toJson(&self) -> String {
@@ -120,6 +208,7 @@ impl ToolResultData {
     #[allow(non_snake_case)]
     pub fn toString(&self) -> String {
         match self {
+            Self::PresentedResultData(data) => data.display.toString(),
             Self::UIPageResultData(data) => data.toString(),
             Self::UIActionResultData(data) => data.toString(),
             Self::JsonResultData(data) => serde_json::to_string(&data.value).expect("Structured result serialization must succeed"),
@@ -570,6 +659,8 @@ pub enum TerminalImplementation {
     Native,
     #[serde(rename = "proot")]
     Proot,
+    #[serde(rename = "termux")]
+    Termux,
     #[serde(rename = "chroot")]
     Chroot,
     #[serde(rename = "android-system")]
@@ -591,6 +682,7 @@ impl TerminalImplementation {
         match self {
             Self::Native => "native",
             Self::Proot => "proot",
+            Self::Termux => "termux",
             Self::Chroot => "chroot",
             Self::AndroidSystem => "android-system",
             Self::Adb => "adb",
@@ -614,6 +706,7 @@ impl TryFrom<&str> for TerminalImplementation {
         match value {
             "native" => Ok(Self::Native),
             "proot" => Ok(Self::Proot),
+            "termux" => Ok(Self::Termux),
             "chroot" => Ok(Self::Chroot),
             "android-system" => Ok(Self::AndroidSystem),
             "adb" => Ok(Self::Adb),
@@ -1583,11 +1676,17 @@ pub struct ChatScheduledMessage {
     pub id: String,
     pub chatId: String,
     pub timestamp: i64,
-    /// preparing, scheduled, delivered, cancelled, invalidated, skipped, or failed.
+    /// preparing, scheduled, delivered, cancelled, invalidated, skipped, or failed. Delivered confirms persistence, not UI visibility.
     pub status: String,
     pub error: JsNullable<String>,
     /// Contains the accepted prepared body, including host-generated replies.
     pub text: String,
+    /// Reports whether notification delivery or registration was requested; old receipts may lack this evidence.
+    pub notificationAttempted: bool,
+    /// Reports Host acceptance, not system display or user visibility.
+    pub notificationRegistered: bool,
+    /// Contains notification failure independently of message persistence.
+    pub notificationError: JsNullable<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3287,6 +3386,7 @@ pub struct EdgePortResultData {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TerminalObservationResultData {
+    Session { result: TerminalSessionCreationResultData },
     Run { result: TerminalCommandResultData },
     Open { handle: String },
     Next { event: JsNullable<super::system::TerminalExecEvent> },

@@ -15,11 +15,14 @@ from common import (
     flutter_pub_get,
     generate_dart_proxy_artifacts,
     prepare_python_command,
+    prepare_plugin_assets,
     require_command,
     run,
 )
 
 from macos_distribution import MACOS_TYPES, build_environment, built_app_path, verify_app_type
+from macos_validation import verify_macos_archive
+from macos_packaging import package_macos_dmg
 
 
 # Packages the macOS app bundle as a release archive.
@@ -36,6 +39,10 @@ def package_macos_app(archive_path: Path | None = None, build_type: str = "sandb
     run(["ditto", "-c", "-k", "--keepParent", str(app_path), str(archive_path)])
     if not archive_path.is_file() or archive_path.stat().st_size == 0:
         raise RuntimeError(f"macOS archive was not produced: {archive_path}")
+    verify_macos_archive(archive_path, build_type)
+    if build_type == "unsandbox":
+        image = package_macos_dmg(app_path, archive_path.with_suffix(".dmg"), build_type)
+        print(f"macOS disk image: {image}", flush=True)
     return archive_path
 
 
@@ -56,6 +63,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     os.environ.setdefault("RUSTFLAGS", "-Awarnings")
+    prepare_plugin_assets(flutter_assets=True)
     require_command("cargo")
     flutter = flutter_command()
     if not args.skip_proxy_generation:

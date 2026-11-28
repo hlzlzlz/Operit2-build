@@ -2,9 +2,11 @@
 
 pub mod AtomicCounter;
 pub mod FileSystemResource;
+pub mod BundledResourceHost;
 pub mod HostFileSystemRoots;
 pub use FileSystemResource::{FileSource, FileTarget};
 pub mod RuntimeStorageLayout;
+pub mod PortableFilePath;
 pub mod PluginStorage;
 pub mod HttpServer;
 pub mod PluginSdkIpc;
@@ -1807,6 +1809,17 @@ pub struct TerminalSessionInfo {
     pub isNewSession: bool,
 }
 
+/// Opens either an interactive shell or one command process, with its directory set before execution.
+#[derive(Clone, Debug)]
+pub struct TerminalSessionRequest {
+    pub sessionName: String,
+    pub terminal: String,
+    pub terminalType: String,
+    pub workingDir: Option<String>,
+    /// None opens an interactive shell; Some starts a fresh command whose process exit is final.
+    pub command: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalCommandOutput {
     pub command: String,
@@ -1907,6 +1920,10 @@ pub fn terminalSessionKey(terminalType: &str, name: &str) -> String {
 }
 
 pub trait TerminalHost: Send + Sync {
+    /// Starts a fresh PTY process without typing a script into an existing interactive shell.
+    fn openTerminalSession(&self, _request: &TerminalSessionRequest) -> HostResult<TerminalSessionInfo> {
+        Err(HostError::new("This terminal host does not implement process-owned sessions"))
+    }
     /// Lists archives executable by this host; an empty catalog means installation is unsupported.
     fn terminalDistributions(&self) -> HostResult<Vec<TerminalDistribution>> {
         Ok(Vec::new())
@@ -2076,6 +2093,10 @@ pub struct RuntimeStorageEntry {
 }
 
 pub trait RuntimeStorageHost: Send + Sync {
+    /// Excludes Host-private storage from portable snapshots before traversal or replacement.
+    /// Paths use the logical runtime namespace; exclusions include the entire addressed subtree.
+    fn isSnapshotExcludedPath(&self, _path: &str) -> bool { false }
+
     /// Opens a private sequential writer; commit publishes the complete file atomically.
     /// Returning None allows small legacy hosts to use their ordinary bounded write path.
     fn openWriteSession(&self, _path: &str) -> HostResult<Option<Box<dyn RuntimeStorageWriteSession>>> {
@@ -2152,6 +2173,10 @@ pub trait RuntimeStorageHost: Send + Sync {
 macro_rules! delegate_runtime_storage {
     ($host:ty, $field:ident) => {
         impl $crate::RuntimeStorageHost for $host {
+            /// Delegates portable snapshot ownership to the underlying storage Host.
+            fn isSnapshotExcludedPath(&self, path: &str) -> bool {
+                $crate::RuntimeStorageHost::isSnapshotExcludedPath(&self.$field, path)
+            }
             fn openWriteSession(&self, path: &str) -> $crate::HostResult<Option<Box<dyn $crate::RuntimeStorageWriteSession>>> {
                 $crate::RuntimeStorageHost::openWriteSession(&self.$field, path)
             }

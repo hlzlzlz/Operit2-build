@@ -467,6 +467,9 @@
   },
   "chatSpeechInputConfigurationRequired": "Sélectionnez une configuration de reconnaissance vocale dans Paramètres > Modèles et IA avant d'utiliser la saisie vocale.",
   "chatSpeechNoTextRecognized": "Aucune parole reconnue.",
+  "chatVoiceListening": "Écoute en cours…",
+  "chatVoiceStopListening": "Arrêter la saisie vocale",
+  "chatVoiceThinking": "reconnaissance",
   "history": "Historique",
   "bookmarks": "Favoris",
   "downloads": "Téléchargements",
@@ -484,6 +487,7 @@
   "searchHistory": "Historique de recherche",
   "noDownloadTasks": "Aucun téléchargement pour le moment",
   "openFile": "Ouvrir le fichier",
+  "openInOtherApp": "Ouvrir avec une autre app",
   "workspaceFileOpening": "Ouverture du fichier…",
   "workspaceFileOpenTimedOut": "Délai d'ouverture du fichier dépassé. Veuillez réessayer.",
   "openLocation": "Ouvrir l'emplacement",
@@ -845,6 +849,8 @@
   "settingsModelProviderTypeOllama": "Ollama",
   "settingsModelProviderTypeOpenaiLocal": "OpenAI Local",
   "settingsModelProviderTypeLocalModel": "Modèle local",
+  "settingsModelProviderTypeLocalGateway": "Passerelle locale",
+  "settingsModelLocalGatewayHint": "Créez ce fournisseur sur l’appareil exécutant Magpie, CC Switch ou une autre passerelle. Les adresses locales désignent cet appareil ; les autres appareils y accèdent par route. Compatible avec /v1/chat/completions, /v1/responses et /v1/messages. Gardez cet appareil en ligne et autorisez l’exécution à distance.",
   "localModelsLoadFailed": "Échec du chargement de l'état des modèles locaux : {error}",
   "@localModelsLoadFailed": {
     "placeholders": {
@@ -991,6 +997,54 @@
   "settingsModelEditProvider": "Modifier le fournisseur",
   "settingsModelAddModel": "Ajouter un modèle",
   "settingsModelAddModelShort": "Ajouter",
+  "settingsModelSyncModels": "Synchroniser les modèles",
+  "settingsModelSyncingModels": "Synchronisation...",
+  "settingsModelSyncModelsTooltip": "Récupérer la dernière liste de modèles et supprimer les anciens modèles non personnalisés",
+  "settingsModelCustomBadge": "Personnalisé",
+  "settingsModelSyncUpToDate": "La liste des modèles est à jour ({total} au total)",
+  "@settingsModelSyncUpToDate": {
+    "placeholders": {
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSummary": "Synchronisé : +{added}, -{removed}, {keptCustom} personnalisés conservés",
+  "@settingsModelSyncSummary": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "keptCustom": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsModelSyncSwitchedBinding": "Synchronisé (+{added}, -{removed}) ; le modèle lié supprimé a été basculé vers {target}",
+  "@settingsModelSyncSwitchedBinding": {
+    "placeholders": {
+      "added": {
+        "type": "int"
+      },
+      "removed": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsModelSyncMissingBinding": "Synchronisé (-{removed}) ; le modèle lié a été supprimé et aucun modèle ne reste",
+  "@settingsModelSyncMissingBinding": {
+    "placeholders": {
+      "removed": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelAvailableFetchedOnly": "Récupérés uniquement",
   "settingsModelAvailableIncludeHistory": "Inclure l'historique",
   "settingsModelAvailableSourceFetched": "Récupéré",
@@ -3507,5 +3561,102 @@
   "settingsToolsReadWriteDescription": "L’IA peut lire et modifier l’espace de travail actuel. Le bac à sable de l’application reste activé.",
   "settingsToolsFullAccessDescription": "L’IA peut lire et modifier l’espace de travail actuel. Ce mode désactive le bac à sable de l’application.",
   "settingsToolsAuthorizationFailed": "Échec de l’autorisation : {error}",
-  "settingsToolsItemCount": "{count, plural, one{{count} élément} other{{count} éléments}}"
+  "settingsToolsItemCount": "{count, plural, one{{count} élément} other{{count} éléments}}",
+  "settingsUsageTabAnalytics": "Utilisation et vitesse",
+  "settingsUsageTabQuotas": "Soldes et quotas",
+  "settingsUsageDeviceScopeAll": "Tous les appareils",
+  "settingsUsageDeviceScopeLocal": "Cet appareil",
+  "settingsUsageExportJson": "Copier le rapport JSON",
+  "settingsUsageExportCsv": "Copier le tableau CSV",
+  "settingsUsageExportCopied": "Rapport copié dans le presse-papiers",
+  "settingsUsageResetScopeTitle": "Réinitialiser les statistiques",
+  "settingsUsageResetLocalOnly": "Cet appareil uniquement",
+  "settingsUsageResetAllSpace": "Tous les appareils du Space",
+  "settingsUsageResetScopeWarning": "La réinitialisation locale conserve les données des autres appareils ; la réinitialisation du Space efface l'historique sur tous les appareils.",
+  "settingsUsageKpiThroughput": "Vitesse moyenne",
+  "settingsUsageKpiTtftMedian": "TTFT médian : {ttft}",
+  "settingsUsageKpiSpeedSamples": "{count} requêtes en flux",
+  "settingsUsageKpiReasoning": "Raisonnement",
+  "settingsUsageKpiCacheWrite": "Écriture cache",
+  "settingsUsageKpiSuccessRate": "{ok} ok · {err} échec/annul.",
+  "settingsUsageTimelineSpeedTitle": "Débit de génération (tok/s)",
+  "settingsUsageTimelineSpeedDetail": "Flux {speed} tok/s · TTFT {ttft}",
+  "settingsUsageTimelineNoSpeedData": "Aucune requête streaming ≥100 ms",
+  "settingsUsageAttrModels": "Modèles",
+  "settingsUsageAttrSources": "Fonction et source",
+  "settingsUsageAttrDevices": "Appareils Space",
+  "settingsUsageAttrLogs": "Journal des requêtes",
+  "settingsUsageColSpeed": "Vitesse",
+  "settingsUsageColTtft": "TTFT",
+  "settingsUsageColSpend": "Coût est.",
+  "settingsUsageColShare": "Part",
+  "settingsUsageDeviceUnknown": "Appareil local / hérité",
+  "settingsUsageLogFilterRecent": "Récents",
+  "settingsUsageLogFilterTopTokens": "Pics de tokens",
+  "settingsUsageLogFilterIssues": "Échecs / Annulés",
+  "settingsUsageLogFilterReasoning": "Raisonnement",
+  "settingsUsageStatusCompleted": "Terminé",
+  "settingsUsageStatusCancelled": "Annulé",
+  "settingsUsageStatusFailed": "Échoué",
+  "settingsUsageRequestDetailTitle": "Télémétrie de requête",
+  "settingsUsageLatencyBreakdown": "Attente {wait} · Flux {stream}",
+  "settingsQuotaProbeAll": "Tout actualiser",
+  "settingsQuotaProbeSingle": "Actualiser",
+  "settingsQuotaProbeViaNode": "Interroger via un nœud Space",
+  "settingsQuotaFilterAll": "Tous",
+  "settingsQuotaFilterBalance": "Soldes",
+  "settingsQuotaFilterSubscription": "Forfaits",
+  "settingsQuotaFilterLocal": "Local",
+  "settingsQuotaFilterBudget": "Budgets & Console",
+  "settingsQuotaRemainingLabel": "Solde restant",
+  "settingsQuotaCashLabel": "Payant",
+  "settingsQuotaGrantedLabel": "Offert",
+  "settingsQuotaUsedLabel": "Utilisé",
+  "settingsQuotaDailyUsedLabel": "Aujourd'hui",
+  "settingsQuotaMonthlyUsedLabel": "Ce mois",
+  "settingsQuotaKeyPoolCount": "{count} clés pool",
+  "settingsQuotaStatusOk": "Actif",
+  "settingsQuotaStatusUnauthorized": "Non autorisé",
+  "settingsQuotaStatusError": "Erreur",
+  "settingsQuotaStatusStale": "Non interrogé",
+  "settingsQuotaStatusUnsupported": "Pas d'API solde",
+  "settingsQuotaProbedBy": "Interrogé par {device} · {time}",
+  "settingsQuotaOpenConsole": "Console",
+  "settingsQuotaProtocolConfig": "Protocole",
+  "settingsQuotaSetBudget": "Plafond mensuel",
+  "settingsQuotaEditBudget": "Modifier le budget",
+  "settingsQuotaBudgetProgress": "{spent} / {limit} ce cycle",
+  "settingsQuotaBudgetExceeded": "Seuil d'alerte budget atteint",
+  "settingsQuotaDialogBudgetLimit": "Plafond mensuel",
+  "settingsQuotaDialogResetDay": "Jour de réinitialisation (1-28)",
+  "settingsQuotaDialogAlertPct": "Seuil d'alerte (%)",
+  "settingsQuotaDialogProtocolLabel": "Protocole de requête",
+  "settingsQuotaDialogCustomPath": "Chemin ou URL personnalisé",
+  "settingsQuotaDialogAmountJsonPath": "Chemin JSON montant",
+  "settingsQuotaDialogCurrencyJsonPath": "Chemin JSON devise",
+  "settingsQuotaDialogClear": "Supprimer",
+  "settingsQuotaEmptyProviders": "Aucun fournisseur configuré",
+  "settingsQuotaLocalZeroCost": "Inférence locale · Zéro frais API",
+  "settingsUsageColStatus": "Statut",
+  "settingsUsageColTime": "Heure",
+  "settingsUsageModeStream": "Flux",
+  "settingsUsageModeNonStream": "Standard",
+  "settingsUsageTopModelsTitle": "Répartition modèles et tokens",
+  "settingsUsageTokenMixLabel": "Composition des tokens",
+  "settingsUsageDirectInputLabel": "Entrée directe",
+  "settingsUsageNoModelsInRange": "Aucun trafic modèle sur cette période",
+  "settingsUsageKpiNoPriceHint": "Tarifs modèle non trouvés",
+  "settingsUsageKpiStreamHint": "Requiert flux ≥100 ms",
+  "settingsUsageHeatmapWeeks": "Activité sur {weeks} sem.",
+  "settingsQuotaSummaryTotalRemaining": "Solde suivi",
+  "settingsQuotaSummaryProviders": "{ready} actifs · {total} configurés",
+  "settingsQuotaSummaryAlertCount": "{count} alertes",
+  "settingsUsageHeatmapSubtitle": "Activité quotidienne sur les {weeks} dernières semaines",
+  "settingsUsageHeatmapMetricTokens": "Tokens",
+  "settingsUsageHeatmapMetricRequests": "Requêtes",
+  "settingsUsageHeatmapMetricCost": "Coût",
+  "settingsUsageWeekdayMon": "Lun",
+  "settingsUsageWeekdayWed": "Mer",
+  "settingsUsageWeekdayFri": "Ven",
+  "settingsUsageWeekdaySun": "Dim"
 }
