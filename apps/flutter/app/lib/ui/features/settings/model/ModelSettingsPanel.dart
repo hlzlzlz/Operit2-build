@@ -1266,6 +1266,555 @@ class _AvailableModelDialog extends StatefulWidget {
   State<_AvailableModelDialog> createState() => _AvailableModelDialogState();
 }
 
+bool _availableProviderModelIsFetched(core_proxy.AvailableProviderModel model) {
+  return model.source != core_proxy.AvailableProviderModelSource.catalog;
+}
+
+String _availableModelSubtitle(
+  AppLocalizations l10n,
+  core_proxy.AvailableProviderModel model, {
+  bool includeSource = false,
+}) {
+  final labels = <String>[];
+  if (includeSource) {
+    labels.add(
+      _availableProviderModelIsFetched(model)
+          ? l10n.settingsModelAvailableSourceFetched
+          : l10n.settingsModelAvailableSourceHistory,
+    );
+  }
+  final capabilities = model.capabilities;
+  if (capabilities != null) {
+    if (capabilities.directImage) {
+      labels.add(l10n.settingsModelDirectImage);
+    }
+    if (capabilities.directAudio) {
+      labels.add(l10n.settingsModelDirectAudio);
+    }
+    if (capabilities.directVideo) {
+      labels.add(l10n.settingsModelDirectVideo);
+    }
+    if (capabilities.toolCall) {
+      labels.add(l10n.settingsModelToolCall);
+    }
+  }
+  if (model.builtinTools.isNotEmpty) {
+    labels.add(l10n.settingsModelBuiltinTools);
+  }
+  final context = model.context;
+  if (context != null) {
+    final formatted = _formatContextLength(context.maxContextTokens);
+    if (formatted != null) {
+      labels.add(formatted);
+    }
+  }
+  return labels.isEmpty ? '-' : labels.join(' · ');
+}
+
+class _AvailableModelDialogState extends State<_AvailableModelDialog> {
+  final _searchController = TextEditingController();
+  final Set<String> _selectedModelIds = <String>{};
+  late _AvailableModelListScope _scope;
+  late List<core_proxy.AvailableProviderModel> _models;
+  late core_proxy.ModelCatalogStatus _catalogStatus;
+  bool _retryingCatalog = false;
+  String? _retryError;
+
+  @override
+  void initState() {
+    super.initState();
+    _models = widget.models;
+    _catalogStatus = widget.catalogStatus;
+    final hasFetched = _models.any(_availableProviderModelIsFetched);
+    _scope = hasFetched
+        ? _AvailableModelListScope.fetched
+        : _AvailableModelListScope.all;
+  }
+
+  /// Downloads the model catalog again and describes the provider's models with it.
+  Future<void> _retryCatalog() async {
+    setState(() {
+      _retryingCatalog = true;
+      _retryError = null;
+    });
+    try {
+      final reload = await widget.onRetryCatalog();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _models = reload.models;
+        _catalogStatus = reload.catalogStatus;
+        final modelIds = _models.map((model) => model.modelId).toSet();
+        _selectedModelIds.retainWhere(modelIds.contains);
+      });
+    } on CoreLinkError catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _retryError = core_proxy.CoreProxyErrorDetails.fromCoreLinkError(
+          error,
+        ).message;
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _retryingCatalog = false);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// Returns models in the current fetched-or-history scope.
+  List<core_proxy.AvailableProviderModel> _scopedModels() {
+    if (_scope == _AvailableModelListScope.all) {
+      return _models;
+    }
+    return _models
+        .where(_availableProviderModelIsFetched)
+        .toList(growable: false);
+  }
+
+  /// Filters scoped models according to the current search query.
+  List<core_proxy.AvailableProviderModel> _filteredModels(
+    AppLocalizations l10n,
+  ) {
+    final query = _searchController.text.trim().toLowerCase();
+    final scopedModels = _scopedModels();
+    if (query.isEmpty) {
+      return scopedModels;
+    }
+    return scopedModels
+        .where((model) {
+          final text =
+              '${model.modelId} ${_availableModelSubtitle(l10n, model, includeSource: _scope == _AvailableModelListScope.all)}'
+                  .toLowerCase();
+          return text.contains(query);
+        })
+        .toList(growable: false);
+  }
+
+  /// Switches between fetched-only and catalog-history listings.
+  void _setScope(_AvailableModelListScope scope) {
+    setState(() {
+      _scope = scope;
+      if (scope == _AvailableModelListScope.fetched) {
+        _selectedModelIds.removeWhere((modelId) {
+          return _models.any(
+            (model) =>
+                model.modelId == modelId &&
+                !_availableProviderModelIsFetched(model),
+          );
+        });
+      }
+    });
+  }
+
+  /// Toggles the selected state of one catalog model.
+  void _toggleModel(core_proxy.AvailableProviderModel model) {
+    setState(() {
+      if (_selectedModelIds.contains(model.modelId)) {
+        _selectedModelIds.remove(model.modelId);
+      } else {
+        _selectedModelIds.add(model.modelId);
+      }
+    });
+  }
+
+  /// Returns the selected catalog models in their displayed catalog order.
+  List<core_proxy.AvailableProviderModel> _selectedModels() {
+    return _models
+        .where((model) => _selectedModelIds.contains(model.modelId))
+        .toList(growable: false);
+  }
+
+  /// Returns whether all currently filtered models are selected.
+  bool _areAllFilteredSelected(
+    List<core_proxy.AvailableProviderModel> filtered,
+  ) {
+    if (filtered.isEmpty) {
+      return false;
+    }
+    return filtered.every((model) => _selectedModelIds.contains(model.modelId));
+  }
+
+  /// Selects or clears all currently filtered models.
+  void _toggleSelectAll(List<core_proxy.AvailableProviderModel> filtered) {
+    setState(() {
+      if (_areAllFilteredSelected(filtered)) {
+        for (final model in filtered) {
+          _selectedModelIds.remove(model.modelId);
+        }
+      } else {
+        for (final model in filtered) {
+          _selectedModelIds.add(model.modelId);
+        }
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final textTheme = theme.textTheme;
+    final l10n = AppLocalizations.of(context)!;
+    final query = _searchController.text.trim();
+    final filteredModels = _filteredModels(l10n);
+    final includeSource = _scope == _AvailableModelListScope.all;
+    final fetchedCount = _models.where(_availableProviderModelIsFetched).length;
+    final allCount = _models.length;
+    final allFilteredSelected = _areAllFilteredSelected(filteredModels);
+
+    final viewport = MediaQuery.sizeOf(context);
+    final dialogWidth = (viewport.width - 32).clamp(320.0, 560.0).toDouble();
+    final dialogHeight = (viewport.height - 48).clamp(320.0, 600.0).toDouble();
+
+    return Dialog(
+      insetPadding: const EdgeInsets.all(16),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: SizedBox(
+        width: dialogWidth,
+        height: dialogHeight,
+        child: Column(
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 12, 12, 12),
+              child: Row(
+                children: <Widget>[
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: colorScheme.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: Center(
+                      child: _LucideIcon(
+                        _kSvgLayers,
+                        size: 18,
+                        color: colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      l10n.settingsModelAddModel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).closeButtonTooltip,
+                    icon: _LucideIcon(
+                      _kSvgClose,
+                      size: 16,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Column(
+                children: <Widget>[
+                  Container(
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceContainerHighest.withValues(
+                        alpha: 0.35,
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: colorScheme.outlineVariant.withValues(
+                          alpha: 0.25,
+                        ),
+                      ),
+                    ),
+                    child: TextField(
+                      controller: _searchController,
+                      style: textTheme.bodyMedium,
+                      textAlignVertical: TextAlignVertical.center,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        border: InputBorder.none,
+                        prefixIcon: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: _LucideIcon(
+                            _kSvgSearch,
+                            size: 16,
+                            color: colorScheme.onSurfaceVariant.withValues(
+                              alpha: 0.7,
+                            ),
+                          ),
+                        ),
+                        prefixIconConstraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                        hintText: l10n.search,
+                        hintStyle: textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onSurfaceVariant.withValues(
+                            alpha: 0.6,
+                          ),
+                        ),
+                        suffixIcon: _searchController.text.isNotEmpty
+                            ? IconButton(
+                                icon: _LucideIcon(
+                                  _kSvgClose,
+                                  size: 14,
+                                  color: colorScheme.onSurfaceVariant,
+                                ),
+                                visualDensity: VisualDensity.compact,
+                                padding: EdgeInsets.zero,
+                                onPressed: () {
+                                  _searchController.clear();
+                                  setState(() {});
+                                },
+                              )
+                            : null,
+                        suffixIconConstraints: const BoxConstraints(
+                          minWidth: 32,
+                          minHeight: 32,
+                        ),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: _TransformerScopeSlider(
+                          scope: _scope,
+                          fetchedLabel:
+                              '${l10n.settingsModelAvailableFetchedOnly} ($fetchedCount)',
+                          allLabel:
+                              '${l10n.settingsModelAvailableIncludeHistory} ($allCount)',
+                          onChanged: _setScope,
+                        ),
+                      ),
+                      if (filteredModels.isNotEmpty) ...<Widget>[
+                        const SizedBox(width: 10),
+                        Material(
+                          color: colorScheme.surfaceContainerHighest.withValues(
+                            alpha: 0.35,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            side: BorderSide(
+                              color: colorScheme.outlineVariant.withValues(
+                                alpha: 0.15,
+                              ),
+                            ),
+                          ),
+                          child: InkWell(
+                            onTap: () => _toggleSelectAll(filteredModels),
+                            borderRadius: BorderRadius.circular(10),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 7,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: <Widget>[
+                                  _LucideIcon(
+                                    allFilteredSelected
+                                        ? _kSvgClose
+                                        : _kSvgCheckSquare,
+                                    size: 14,
+                                    color: allFilteredSelected
+                                        ? colorScheme.error
+                                        : colorScheme.primary,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    allFilteredSelected
+                                        ? l10n.clear
+                                        : l10n.settingsWorkspaceSelectAllCurrentList,
+                                    style: textTheme.labelMedium?.copyWith(
+                                      color: allFilteredSelected
+                                          ? colorScheme.error
+                                          : colorScheme.primary,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _CatalogStatusLine(
+                    status: _catalogStatus,
+                    retryError: _retryError,
+                    retrying: _retryingCatalog,
+                    onRetry: _retryCatalog,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                children: <Widget>[
+                  if (filteredModels.isEmpty &&
+                      query.isEmpty &&
+                      _scope == _AvailableModelListScope.fetched)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 36,
+                        horizontal: 16,
+                      ),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            _LucideIcon(
+                              _kSvgCloudOff,
+                              size: 36,
+                              color: colorScheme.onSurfaceVariant.withValues(
+                                alpha: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              l10n.settingsModelAvailableEmptyFetched,
+                              textAlign: TextAlign.center,
+                              style: textTheme.bodySmall?.copyWith(
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  else if (filteredModels.isEmpty && query.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 36),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            _LucideIcon(
+                              _kSvgSearchX,
+                              size: 36,
+                              color: colorScheme.onSurfaceVariant.withValues(
+                                alpha: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              l10n.noData,
+                              style: textTheme.bodyMedium?.copyWith(
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  for (final model in filteredModels)
+                    _AvailableModelItemCard(
+                      model: model,
+                      selected: _selectedModelIds.contains(model.modelId),
+                      includeSource: includeSource,
+                      onTap: () => _toggleModel(model),
+                    ),
+                  _CustomModelActionCard(
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(const _AvailableModelCustom()),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 12, 16, 12),
+              child: Row(
+                children: <Widget>[
+                  Text(
+                    _selectedModelIds.isEmpty
+                        ? ''
+                        : l10n.settingsWorkspaceSelectedCount(
+                            _selectedModelIds.length,
+                            filteredModels.length,
+                          ),
+                    style: textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: Text(l10n.cancel),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton(
+                    onPressed: _selectedModelIds.isEmpty
+                        ? null
+                        : () => Navigator.of(
+                            context,
+                          ).pop(_AvailableModelsPicked(_selectedModels())),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 8,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: Text(
+                      '${l10n.settingsModelAddModelShort} (${_selectedModelIds.length})',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 enum _AvailableModelListScope { fetched, all }
 
 // Lucide SVG Icons (MIT License)
