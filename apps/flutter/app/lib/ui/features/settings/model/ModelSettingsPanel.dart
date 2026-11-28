@@ -1311,6 +1311,500 @@ String _availableModelSubtitle(
   return labels.isEmpty ? '-' : labels.join(' · ');
 }
 
+const String _kSvgSparkles =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>';
+const String _kSvgHistory =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>';
+const String _kSvgCpu =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>';
+const String _kSvgChevronRight =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
+const String _kSvgLayers =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.5-8.58 3.91a2 2 0 0 1-1.66 0L2 12.5"/><path d="m22 17.5-8.58 3.91a2 2 0 0 1-1.66 0L2 17.5"/></svg>';
+
+const String _kSvgSearch =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>';
+
+const String _kSvgCheckSquare =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/></svg>';
+
+const String _kSvgCloudOff =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20"/><path d="M5.782 5.782A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.307-.193"/><path d="M21.532 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7.008 7.008 0 0 0 10 5.07"/></svg>';
+
+const String _kSvgSearchX =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m13.5 8.5-5 5"/><path d="m8.5 8.5 5 5"/><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>';
+
+class _TransformerScopeSlider extends StatelessWidget {
+  const _TransformerScopeSlider({
+    required this.scope,
+    required this.fetchedLabel,
+    required this.allLabel,
+    required this.onChanged,
+  });
+
+  final _AvailableModelListScope scope;
+  final String fetchedLabel;
+  final String allLabel;
+  final ValueChanged<_AvailableModelListScope> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isAll = scope == _AvailableModelListScope.all;
+
+    return Container(
+      height: 38,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.18),
+        ),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final itemWidth = (constraints.maxWidth - 2) / 2;
+          return Stack(
+            children: <Widget>[
+              // Fluid Transformer sliding thumb
+              AnimatedAlign(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.fastOutSlowIn,
+                alignment: isAll ? Alignment.centerRight : Alignment.centerLeft,
+                child: Container(
+                  width: itemWidth,
+                  height: double.infinity,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primaryContainer.withValues(alpha: 0.65),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: colorScheme.primary.withValues(alpha: 0.35),
+                      width: 1,
+                    ),
+                    boxShadow: <BoxShadow>[
+                      BoxShadow(
+                        color: colorScheme.shadow.withValues(alpha: 0.12),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Option labels with smooth morph animation
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: _SliderOptionItem(
+                      icon: _kSvgSparkles,
+                      label: fetchedLabel,
+                      selected: !isAll,
+                      onTap: () => onChanged(_AvailableModelListScope.fetched),
+                    ),
+                  ),
+                  Expanded(
+                    child: _SliderOptionItem(
+                      icon: _kSvgHistory,
+                      label: allLabel,
+                      selected: isAll,
+                      onTap: () => onChanged(_AvailableModelListScope.all),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _CatalogStatusLine extends StatelessWidget {
+  const _CatalogStatusLine({
+    required this.status,
+    required this.retryError,
+    required this.retrying,
+    required this.onRetry,
+  });
+
+  final core_proxy.ModelCatalogStatus status;
+  final String? retryError;
+  final bool retrying;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final error = retryError;
+    final updatedAt = status.updatedAt;
+    final String message;
+    if (error != null) {
+      message = l10n.settingsModelCatalogUpdateFailed(error);
+    } else if (updatedAt == null) {
+      message = l10n.settingsModelCatalogBundled;
+    } else {
+      message = l10n.settingsModelCatalogUpdatedAt(
+        _formatCatalogTime(updatedAt),
+      );
+    }
+    final failed = error != null;
+    final color = failed ? colorScheme.error : colorScheme.onSurfaceVariant;
+    return Row(
+      children: <Widget>[
+        Icon(
+          failed ? Icons.error_outline : Icons.info_outline,
+          size: 14,
+          color: color,
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            message,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: color,
+              fontSize: 11,
+            ),
+          ),
+        ),
+        if (retrying)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: M3LoadingIndicator(size: 14),
+          )
+        else
+          TextButton(
+            onPressed: onRetry,
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+            child: Text(l10n.settingsModelCatalogRetry),
+          ),
+      ],
+    );
+  }
+}
+
+class _AvailableModelItemCard extends StatelessWidget {
+  const _AvailableModelItemCard({
+    required this.model,
+    required this.selected,
+    required this.includeSource,
+    required this.onTap,
+  });
+
+  final core_proxy.AvailableProviderModel model;
+  final bool selected;
+  final bool includeSource;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final textTheme = theme.textTheme;
+    final l10n = AppLocalizations.of(context)!;
+    final contextLength = model.context?.maxContextLength;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: selected
+            ? colorScheme.primaryContainer.withValues(alpha: 0.22)
+            : colorScheme.surfaceContainerHighest.withValues(alpha: 0.2),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(
+            color: selected
+                ? colorScheme.primary.withValues(alpha: 0.45)
+                : colorScheme.outlineVariant.withValues(alpha: 0.18),
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              children: <Widget>[
+                _ModernCheckbox(checked: selected, onTap: onTap),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        model.modelId,
+                        style: textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: selected
+                              ? colorScheme.primary
+                              : colorScheme.onSurface,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: <Widget>[
+                          if (contextLength != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: colorScheme.primary.withValues(
+                                  alpha: 0.12,
+                                ),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                _formatContextLength(contextLength) ??
+                                    '${contextLength.round()}K',
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                          if (includeSource)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: colorScheme.surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                _availableProviderModelIsFetched(model)
+                                    ? l10n.settingsModelAvailableSourceFetched
+                                    : l10n.settingsModelAvailableSourceHistory,
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.onSurfaceVariant,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                          if (model.capabilities != null)
+                            _ModelCapabilityCapsules(
+                              capabilities: model.capabilities!,
+                            ),
+                          if (model.catalogModelId == null &&
+                              model.capabilities == null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: colorScheme.errorContainer.withValues(
+                                  alpha: 0.45,
+                                ),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                l10n.settingsModelUnrecognized,
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.onErrorContainer,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                          if (model.builtinTools.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 5,
+                                vertical: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: colorScheme.tertiaryContainer.withValues(
+                                  alpha: 0.35,
+                                ),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                l10n.settingsModelBuiltinTools,
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.tertiary,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomModelActionCard extends StatelessWidget {
+  const _CustomModelActionCard({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final l10n = AppLocalizations.of(context)!;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      child: Material(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.18),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(
+            color: colorScheme.outlineVariant.withValues(alpha: 0.22),
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Center(
+                    child: _LucideIcon(
+                      _kSvgCpu,
+                      size: 16,
+                      color: colorScheme.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        l10n.settingsModelCustomModel,
+                        style: textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: colorScheme.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        l10n.settingsModelModelId,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                _LucideIcon(
+                  _kSvgChevronRight,
+                  size: 16,
+                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SliderOptionItem extends StatelessWidget {
+  const _SliderOptionItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Center(
+          child: AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeInOut,
+            style: textTheme.labelMedium!.copyWith(
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              color: selected
+                  ? colorScheme.onPrimaryContainer
+                  : colorScheme.onSurfaceVariant,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                AnimatedScale(
+                  scale: selected ? 1.06 : 0.94,
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutBack,
+                  child: _LucideIcon(
+                    icon,
+                    size: 14,
+                    color: selected
+                        ? colorScheme.primary
+                        : colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _AvailableModelDialogState extends State<_AvailableModelDialog> {
   final _searchController = TextEditingController();
   final Set<String> _selectedModelIds = <String>{};
